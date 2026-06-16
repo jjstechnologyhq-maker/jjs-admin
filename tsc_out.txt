@@ -1,0 +1,14 @@
+src/app/(dashboard)/liquidity/page.tsx(111,26): error TS2322: Type '{ children: Element; asChild: true; }' is not assignable to type 'IntrinsicAttributes & Props<unknown>'.
+  Property 'asChild' does not exist on type 'IntrinsicAttributes & Props<unknown>'.
+src/app/(dashboard)/liquidity/page.tsx(127,47): error TS2322: Type 'Dispatch<SetStateAction<string>>' is not assignable to type '(value: string | null, eventDetails: SelectRootChangeEventDetails) => void'.
+  Types of parameters 'value' and 'value' are incompatible.
+    Type 'string | null' is not assignable to type 'SetStateAction<string>'.
+      Type 'null' is not assignable to type 'SetStateAction<string>'.
+src/app/(dashboard)/liquidity/page.tsx(143,50): error TS2322: Type '(v: "CREDIT" | "DEBIT") => void' is not assignable to type '(value: "CREDIT" | "DEBIT" | null, eventDetails: SelectRootChangeEventDetails) => void'.
+  Types of parameters 'v' and 'value' are incompatible.
+    Type '"CREDIT" | "DEBIT" | null' is not assignable to type '"CREDIT" | "DEBIT"'.
+      Type 'null' is not assignable to type '"CREDIT" | "DEBIT"'.
+src/components/data-table.tsx(684,22): error TS2322: Type '{ children: string; render: Element; }' is not assignable to type 'IntrinsicAttributes & DialogTriggerProps & RefAttributes<HTMLButtonElement>'.
+  Property 'render' does not exist on type 'IntrinsicAttributes & DialogTriggerProps & RefAttributes<HTMLButtonElement>'.
+src/components/data-table.tsx(860,24): error TS2322: Type '{ render: Element; }' is not assignable to type 'IntrinsicAttributes & DialogCloseProps & RefAttributes<HTMLButtonElement>'.
+  Property 'render' does not exist on type 'IntrinsicAttributes & DialogCloseProps & RefAttributes<HTMLButtonElement>'.
