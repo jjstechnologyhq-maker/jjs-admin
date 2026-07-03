@@ -1,9 +1,12 @@
 /**
  * Role-Based Access Control types
- * Mirrors PRD §2 — Target Audience & RBAC
  *
- * Uses a permissions array — a single admin can hold multiple roles.
+ * Aligned with the JJS Admin Service API (openapi-admin.yaml): every admin holds
+ * exactly **one** role (AdminRole), not a permissions array. The session profile
+ * mirrors the spec's `AdminProfile` schema.
  */
+
+import type { AdminProfile, AdminRole } from "@/api/schema";
 
 export const ROLES = {
   SUPER_ADMIN: "SUPER_ADMIN",
@@ -12,19 +15,8 @@ export const ROLES = {
   CUSTOMER_SUPPORT: "CUSTOMER_SUPPORT",
 } as const;
 
-export type Role = (typeof ROLES)[keyof typeof ROLES];
+/** Single admin role, sourced from the generated spec type. */
+export type Role = AdminRole;
 
-export interface AdminSession {
-  id: string;
-  email: string;
-  permissions: Role[];
-  exp: number;
-}
-
-export interface JWTPayload {
-  sub: string;
-  email: string;
-  permissions: Role[];
-  exp: number;
-  iat: number;
-}
+/** The authenticated admin — identical to the spec's AdminProfile. */
+export type AdminSession = AdminProfile;

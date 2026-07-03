@@ -11,36 +11,41 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { TrendingUpIcon, Users, UserCheck, Clock, AlertTriangle } from "lucide-react"
-import { adminApi } from "@/api/admin"
+import { Users, DollarSign, BarChart3, Clock } from "lucide-react"
+import { analyticsApi } from "@/api/analytics"
+import { formatAmount } from "@/lib/money"
+
+function isoDaysAgo(days: number) {
+  return new Date(Date.now() - days * 86_400_000).toISOString()
+}
 
 export function SectionCards() {
-  const { data: response, isLoading } = useQuery({
-    queryKey: ["admin", "stats"],
-    queryFn: () => adminApi.getStats(),
-  });
+  const overview = useQuery({
+    queryKey: ["analytics", "overview"],
+    queryFn: () => analyticsApi.overview(),
+  })
+  const funnel = useQuery({
+    queryKey: ["analytics", "kyc-funnel", "30d"],
+    queryFn: () => analyticsApi.kycFunnel({ from: isoDaysAgo(30), to: new Date().toISOString() }),
+  })
 
-  const stats = response?.data;
-
-  if (isLoading) {
+  if (overview.isLoading) {
     return (
       <div className="grid grid-cols-1 gap-4 px-4 lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
           <Card key={i} className="@container/card">
             <CardHeader>
-              <Skeleton className="h-4 w-32 mb-2" />
+              <Skeleton className="mb-2 h-4 w-32" />
               <Skeleton className="h-8 w-24" />
             </CardHeader>
-            <CardFooter>
-              <Skeleton className="h-4 w-48" />
-            </CardFooter>
           </Card>
         ))}
       </div>
-    );
+    )
   }
 
-  if (!stats) return null;
+  const o = overview.data
+  const f = funnel.data
 
   return (
     <div className="grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:bg-linear-to-t *:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4 dark:*:data-[slot=card]:bg-card">
@@ -48,102 +53,62 @@ export function SectionCards() {
         <CardHeader>
           <CardDescription className="flex items-center gap-2">
             <Users className="size-4" />
-            Total Users
+            Daily Active Users
           </CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {stats.totalUsers.toLocaleString()}
+            {(o?.dau ?? 0).toLocaleString()}
           </CardTitle>
-          <CardAction>
-            <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
-              <TrendingUpIcon className="mr-1 size-3" />
-              +{stats.newUsersThisMonth} this month
-            </Badge>
-          </CardAction>
         </CardHeader>
-        <CardFooter className="flex-col items-start gap-1.5 text-sm">
-          <div className="line-clamp-1 flex gap-2 font-medium">
-            Steady growth <TrendingUpIcon className="size-4" />
-          </div>
-          <div className="text-muted-foreground">
-            +{stats.newUsersToday} new today, +{stats.newUsersThisWeek} this week
-          </div>
+        <CardFooter className="text-sm text-muted-foreground">
+          As of {o?.dataDate ?? "—"}
         </CardFooter>
       </Card>
 
       <Card className="@container/card">
         <CardHeader>
           <CardDescription className="flex items-center gap-2">
-            <UserCheck className="size-4" />
-            Active Users
+            <DollarSign className="size-4" />
+            Revenue (today)
           </CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {stats.activeUsers.toLocaleString()}
+            {formatAmount(o?.revenue, "NGN")}
           </CardTitle>
-          <CardAction>
-            <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
-              {Math.round((stats.activeUsers / Math.max(stats.totalUsers, 1)) * 100)}%
-            </Badge>
-          </CardAction>
         </CardHeader>
-        <CardFooter className="flex-col items-start gap-1.5 text-sm">
-          <div className="line-clamp-1 flex gap-2 font-medium">
-            Strong user retention
-          </div>
-          <div className="text-muted-foreground">
-            Actively using the platform
-          </div>
-        </CardFooter>
+        <CardFooter className="text-sm text-muted-foreground">Fee revenue snapshot</CardFooter>
+      </Card>
+
+      <Card className="@container/card">
+        <CardHeader>
+          <CardDescription className="flex items-center gap-2">
+            <BarChart3 className="size-4" />
+            Total Volume
+          </CardDescription>
+          <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
+            {formatAmount(o?.totalVolume, "NGN")}
+          </CardTitle>
+        </CardHeader>
+        <CardFooter className="text-sm text-muted-foreground">Across all transactions</CardFooter>
       </Card>
 
       <Card className="@container/card">
         <CardHeader>
           <CardDescription className="flex items-center gap-2">
             <Clock className="size-4" />
-            Pending KYC
+            KYC Pending (30d)
           </CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {stats.pendingKycUsers.toLocaleString()}
+            {(f?.pending ?? 0).toLocaleString()}
           </CardTitle>
-          {stats.pendingKycUsers > 0 && (
+          {f && f.pending > 0 && (
             <CardAction>
-              <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20">
-                Action Needed
+              <Badge variant="outline" className="border-amber-500/20 bg-amber-500/10 text-amber-600">
+                Action needed
               </Badge>
             </CardAction>
           )}
         </CardHeader>
-        <CardFooter className="flex-col items-start gap-1.5 text-sm">
-          <div className="line-clamp-1 flex gap-2 font-medium text-amber-600">
-            Awaiting verification
-          </div>
-          <div className="text-muted-foreground">
-            Check the KYC queue
-          </div>
-        </CardFooter>
-      </Card>
-
-      <Card className="@container/card">
-        <CardHeader>
-          <CardDescription className="flex items-center gap-2">
-            <AlertTriangle className="size-4" />
-            Suspended & Flagged
-          </CardDescription>
-          <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {(stats.suspendedUsers + stats.flaggedUsers).toLocaleString()}
-          </CardTitle>
-          <CardAction>
-            <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">
-              {stats.flaggedUsers} Flagged
-            </Badge>
-          </CardAction>
-        </CardHeader>
-        <CardFooter className="flex-col items-start gap-1.5 text-sm">
-          <div className="line-clamp-1 flex gap-2 font-medium text-red-600">
-            {stats.suspendedUsers} Suspended
-          </div>
-          <div className="text-muted-foreground">
-            Requires administrative review
-          </div>
+        <CardFooter className="text-sm text-muted-foreground">
+          {f ? `${f.conversionRate} conversion` : "—"}
         </CardFooter>
       </Card>
     </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -18,18 +18,24 @@ import {
 import { Input } from "@/components/ui/input";
 
 import { useAuthStore } from "@/stores/auth-store";
-import type { Role } from "@/lib/auth/types";
+import { authApi, isForcePasswordChange } from "@/api/auth";
+import { getErrorCode, getErrorMessage } from "@/api/client";
 
-const loginSchema = z.object({
+const credentialsSchema = z.object({
   email: z.string().email("Enter a valid email address"),
   password: z.string().min(1, "Password is required"),
-  // totp: z
-  //   .string()
-  //   .length(6, "TOTP code must be 6 digits")
-  //   .regex(/^\d+$/, "TOTP code must contain only digits"),
 });
+type CredentialsData = z.infer<typeof credentialsSchema>;
 
-type LoginFormData = z.infer<typeof loginSchema>;
+const totpSchema = z.object({
+  totpToken: z
+    .string()
+    .length(6, "Enter the 6-digit code")
+    .regex(/^\d+$/, "Digits only"),
+});
+type TotpData = z.infer<typeof totpSchema>;
+
+const SESSION_TTL_SECONDS = 5 * 60;
 
 export function LoginForm({
   className,
@@ -39,136 +45,211 @@ export function LoginForm({
   const searchParams = useSearchParams();
   const redirect = searchParams.get("redirect") || "/";
   const setSession = useAuthStore((state) => state.setSession);
+
+  const [step, setStep] = useState<"credentials" | "totp">("credentials");
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(SESSION_TTL_SECONDS);
   const [error, setError] = useState<string | null>(null);
 
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-  } = useForm<LoginFormData>({
-    resolver: zodResolver(loginSchema),
+  const credentialsForm = useForm<CredentialsData>({
+    resolver: zodResolver(credentialsSchema),
   });
+  const totpForm = useForm<TotpData>({ resolver: zodResolver(totpSchema) });
 
-  const onSubmit = async (data: LoginFormData) => {
+  // Countdown for the 5-minute session-token window. Expiry is derived in render
+  // (below) rather than set synchronously here.
+  const expired = step === "totp" && secondsLeft <= 0;
+  useEffect(() => {
+    if (step !== "totp" || secondsLeft <= 0) return;
+    const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [step, secondsLeft]);
+
+  const onCredentials = async (data: CredentialsData) => {
     setError(null);
     try {
-      // TODO: Replace mock with real API call when backend is ready:
-      // const res = await authApi.login({ email: data.email, password: data.password });
-      // setSession(
-      //   { id: "...", email: data.email, permissions: [...], exp: ... },
-      //   res.data.accessToken,
-      //   res.data.refreshToken,
-      // );
+      const result = await authApi.login(data);
+      setSessionToken(result.sessionToken);
+      setSecondsLeft(SESSION_TTL_SECONDS);
+      setStep("totp");
+    } catch (err) {
+      const code = getErrorCode(err);
+      if (code === "TOO_MANY_ATTEMPTS") {
+        setError("Too many failed attempts. Try again in 10 minutes.");
+      } else if (code === "ACCOUNT_SUSPENDED") {
+        setError("This account is suspended. Contact a super admin.");
+      } else {
+        setError(getErrorMessage(err, "Invalid email or password"));
+      }
+    }
+  };
 
-      // Mock successful login — bypasses API while backend is not ready
-      // Determine permissions based on email for easy role testing
-      let permissions: Role[] = ["SUPER_ADMIN"];
-      if (data.email.includes("compliance"))
-        permissions = ["COMPLIANCE_OFFICER"];
-      if (data.email.includes("finance")) permissions = ["FINANCE_MANAGER"];
-      if (data.email.includes("support")) permissions = ["CUSTOMER_SUPPORT"];
+  const onTotp = async (data: TotpData) => {
+    if (!sessionToken) return;
+    setError(null);
+    try {
+      const result = await authApi.verifyTotp({
+        sessionToken,
+        totpToken: data.totpToken,
+      });
 
-      setSession(
-        {
-          id: "mock_admin_123",
-          email: data.email,
-          permissions,
-          exp: Math.floor(Date.now() / 1000) + 15 * 60,
-        },
-        "mock_access_token_for_dev",
-        "mock_refresh_token_for_dev",
-      );
+      if (isForcePasswordChange(result)) {
+        router.push("/change-password?forced=1");
+        return;
+      }
 
+      setSession(result.admin, result.accessToken, result.refreshToken);
       router.push(redirect);
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "An unexpected error occurred";
-      setError(message);
+    } catch (err) {
+      const code = getErrorCode(err);
+      if (code === "SESSION_EXPIRED") {
+        setError("Your session expired. Please sign in again.");
+        setStep("credentials");
+      } else if (code === "MFA_NOT_ENROLLED") {
+        setError(
+          "MFA is not set up for this account. Use your activation link or ask a super admin to reset MFA.",
+        );
+      } else {
+        setError(getErrorMessage(err, "Invalid or expired code"));
+      }
     }
   };
 
   return (
     <div className={cn("flex flex-col gap-6", className)} {...props}>
-      <form onSubmit={handleSubmit(onSubmit)}>
-        <FieldGroup>
-          <div className="flex flex-col items-center gap-2 text-center mb-4">
-            <a
-              href="#"
-              className="flex flex-col items-center gap-2 font-medium"
-            >
-              <div className="flex size-12 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-                <ShieldCheck className="size-6" />
-              </div>
-              <span className="sr-only">Admin Control Centre</span>
-            </a>
-            <h1 className="text-xl font-bold mt-2">Admin Control Centre</h1>
-            <FieldDescription>
-              Sign in with your admin credentials
-            </FieldDescription>
-          </div>
+      <div className="flex flex-col items-center gap-2 text-center mb-2">
+        <div className="flex size-12 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+          <ShieldCheck className="size-6" />
+        </div>
+        <h1 className="text-xl font-bold mt-2">Admin Control Centre</h1>
+        <FieldDescription>
+          {step === "credentials"
+            ? "Sign in with your admin credentials"
+            : "Enter the 6-digit code from your authenticator app"}
+        </FieldDescription>
+      </div>
 
-          <Field>
-            <FieldLabel htmlFor="email">Email</FieldLabel>
-            <Input
-              id="email"
-              type="email"
-              placeholder="admin@company.com"
-              autoComplete="email"
-              {...register("email")}
-            />
-            {errors.email && (
-              <p className="text-xs text-destructive">{errors.email.message}</p>
-            )}
-          </Field>
-
-          <Field>
-            <FieldLabel htmlFor="password">Password</FieldLabel>
-            <Input
-              id="password"
-              type="password"
-              placeholder="••••••••"
-              autoComplete="current-password"
-              {...register("password")}
-            />
-            {errors.password && (
-              <p className="text-xs text-destructive">
-                {errors.password.message}
-              </p>
-            )}
-          </Field>
-
-          {/* <Field>
-            <FieldLabel htmlFor="totp">Authenticator Code</FieldLabel>
-            <Input
-              id="totp"
-              type="text"
-              inputMode="numeric"
-              placeholder="000000"
-              maxLength={6}
-              autoComplete="one-time-code"
-              {...register("totp")}
-            />
-            {errors.totp && (
-              <p className="text-xs text-destructive">{errors.totp.message}</p>
-            )}
-          </Field> */}
-
-          {error && (
-            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive mt-2">
-              {error}
-            </div>
-          )}
-
-          <Field className="">
-            <Button type="submit" className="w-full" disabled={isSubmitting}>
-              {isSubmitting && (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+      {step === "credentials" ? (
+        <form onSubmit={credentialsForm.handleSubmit(onCredentials)}>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="email">Email</FieldLabel>
+              <Input
+                id="email"
+                type="email"
+                placeholder="admin@company.com"
+                autoComplete="email"
+                {...credentialsForm.register("email")}
+              />
+              {credentialsForm.formState.errors.email && (
+                <p className="text-xs text-destructive">
+                  {credentialsForm.formState.errors.email.message}
+                </p>
               )}
-              Sign in
-            </Button>
-          </Field>
-        </FieldGroup>
-      </form>
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="password">Password</FieldLabel>
+              <Input
+                id="password"
+                type="password"
+                placeholder="••••••••"
+                autoComplete="current-password"
+                {...credentialsForm.register("password")}
+              />
+              {credentialsForm.formState.errors.password && (
+                <p className="text-xs text-destructive">
+                  {credentialsForm.formState.errors.password.message}
+                </p>
+              )}
+            </Field>
+
+            {error && (
+              <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {error}
+              </div>
+            )}
+
+            <Field>
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={credentialsForm.formState.isSubmitting}
+              >
+                {credentialsForm.formState.isSubmitting && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                Continue
+              </Button>
+            </Field>
+          </FieldGroup>
+        </form>
+      ) : (
+        <form onSubmit={totpForm.handleSubmit(onTotp)}>
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="totpToken">Authenticator Code</FieldLabel>
+              <Input
+                id="totpToken"
+                type="text"
+                inputMode="numeric"
+                placeholder="000000"
+                maxLength={6}
+                autoComplete="one-time-code"
+                autoFocus
+                {...totpForm.register("totpToken")}
+              />
+              {totpForm.formState.errors.totpToken && (
+                <p className="text-xs text-destructive">
+                  {totpForm.formState.errors.totpToken.message}
+                </p>
+              )}
+              <FieldDescription>
+                {expired ? (
+                  <span className="text-destructive">
+                    The verification window expired — go back and sign in again.
+                  </span>
+                ) : (
+                  <>
+                    Code expires in {Math.floor(secondsLeft / 60)}:
+                    {String(secondsLeft % 60).padStart(2, "0")}
+                  </>
+                )}
+              </FieldDescription>
+            </Field>
+
+            {error && (
+              <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {error}
+              </div>
+            )}
+
+            <Field className="gap-2">
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={totpForm.formState.isSubmitting || expired}
+              >
+                {totpForm.formState.isSubmitting && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                Verify & sign in
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="w-full"
+                onClick={() => {
+                  setStep("credentials");
+                  setError(null);
+                }}
+              >
+                Back
+              </Button>
+            </Field>
+          </FieldGroup>
+        </form>
+      )}
     </div>
   );
 }

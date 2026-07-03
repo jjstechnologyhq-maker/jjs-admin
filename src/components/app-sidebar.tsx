@@ -28,8 +28,8 @@ import {
   Zap,
   HeadphonesIcon,
   ShieldCheck,
+  ShieldAlert,
   ScrollText,
-  Settings,
   ChartBarIcon,
 } from "lucide-react";
 
@@ -91,6 +91,12 @@ export const NAV_SECTIONS: NavSection[] = [
           ROLES.FINANCE_MANAGER,
         ],
       },
+      {
+        label: "Risk",
+        href: "/risk",
+        icon: ShieldAlert,
+        roles: [ROLES.SUPER_ADMIN, ROLES.COMPLIANCE_OFFICER],
+      },
     ],
   },
   {
@@ -146,23 +152,13 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "Audit Log",
         href: "/audit",
         icon: ScrollText,
-        roles: [ROLES.SUPER_ADMIN, ROLES.COMPLIANCE_OFFICER],
-      },
-      {
-        label: "System Config",
-        href: "/system-config",
-        icon: Settings,
         roles: [ROLES.SUPER_ADMIN],
       },
       {
         label: "Analytics & Reporting",
         href: "/analytics",
         icon: ChartBarIcon,
-        roles: [
-          ROLES.SUPER_ADMIN,
-          ROLES.FINANCE_MANAGER,
-          ROLES.COMPLIANCE_OFFICER,
-        ],
+        roles: ALL_ROLES,
       },
     ],
   },
@@ -171,20 +167,16 @@ export const NAV_SECTIONS: NavSection[] = [
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
   const session = useAuthStore((state) => state.session);
-  const userPermissions = session?.permissions ?? [];
+  const role = session?.role;
 
-  // Guard removed for deployment: when there's no session/permissions,
-  // show the full menu so every endpoint is reachable. Once auth is
-  // restored, the permission intersection takes over again.
-  const filteredSections =
-    userPermissions.length === 0
-      ? NAV_SECTIONS
-      : NAV_SECTIONS.map((section) => ({
-          ...section,
-          items: section.items.filter((item) =>
-            userPermissions.some((perm) => item.roles.includes(perm)),
-          ),
-        })).filter((section) => section.items.length > 0);
+  // When there's no active session yet, show nothing role-specific.
+  // Once a role is present, filter each section to items that role can see.
+  const filteredSections = !role
+    ? []
+    : NAV_SECTIONS.map((section) => ({
+        ...section,
+        items: section.items.filter((item) => item.roles.includes(role)),
+      })).filter((section) => section.items.length > 0);
 
   // We map session data for NavUser
   const userData = {

@@ -9,93 +9,42 @@ import {
   Mail,
   Phone,
   Calendar,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  Ban,
-  Clock,
-  Info,
-  Activity,
-  Shield,
-  Tag,
-  Hash,
+  Smartphone,
+  Trash2,
 } from "lucide-react";
+import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-
+import { Textarea } from "@/components/ui/textarea";
 import {
-  usersApi,
-  type UserProfile,
-  getFullName,
-  KYC_LEVEL_LABELS,
-} from "@/api/users";
-import type { AccountStatus, KycLevel } from "@/api/types";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  StatusBadge,
+  USER_ACCOUNT_STATUS,
+  KYC_STATUS,
+} from "@/components/status-badge";
+import { usersApi } from "@/api/users";
+import type { UserAccountStatus } from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
+import { formatAmount, formatMoney } from "@/lib/money";
 
-// ── Status configs — aligned with openapi.yaml ──────────────────────────────
-
-const ACCOUNT_STATUS_CONFIG: Record<
-  AccountStatus,
-  {
-    label: string;
-    icon: React.ComponentType<{ className?: string }>;
-    className: string;
-  }
-> = {
-  active: {
-    label: "Active",
-    icon: CheckCircle2,
-    className: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
-  },
-  suspended: {
-    label: "Suspended",
-    icon: Ban,
-    className: "bg-orange-500/10 text-orange-600 border-orange-500/20",
-  },
-  unverified: {
-    label: "Unverified",
-    icon: AlertCircle,
-    className: "bg-blue-500/10 text-blue-600 border-blue-500/20",
-  },
-  "pending kyc": {
-    label: "Pending KYC",
-    icon: Clock,
-    className: "bg-amber-500/10 text-amber-600 border-amber-500/20",
-  },
-  flagged: {
-    label: "Flagged",
-    icon: XCircle,
-    className: "bg-red-500/10 text-red-600 border-red-500/20",
-  },
-};
-
-const KYC_LEVEL_CONFIG: Record<
-  KycLevel,
-  {
-    label: string;
-    icon: React.ComponentType<{ className?: string }>;
-    className: string;
-  }
-> = {
-  "0": { label: "Unverified", icon: XCircle, className: "text-red-600" },
-  "1": { label: "Phone Verified", icon: Clock, className: "text-amber-600" },
-  "2": { label: "BVN Verified", icon: Info, className: "text-blue-600" },
-  "3": {
-    label: "Fully Verified",
-    icon: CheckCircle2,
-    className: "text-emerald-600",
-  },
-};
-
-// ── Component ────────────────────────────────────────────────────────────────
+const STATUS_OPTIONS: UserAccountStatus[] = ["ACTIVE", "FROZEN", "SHADOW_BANNED"];
 
 export default function UserDetailPage({
   params,
@@ -105,32 +54,17 @@ export default function UserDetailPage({
   const { id } = use(params);
   const router = useRouter();
 
-  const { data: response, isLoading } = useQuery({
+  const { data: user, isLoading } = useQuery({
     queryKey: ["users", "detail", id],
-    queryFn: () => usersApi.getUser(id),
-  });
-
-  const user = response?.data;
-
-  const updateStatusMutation = useAuditedMutation({
-    action: "update_user_status",
-    mutationFn: (status: AccountStatus) => usersApi.updateStatus(id, status),
-    invalidateKeys: [
-      ["users", "detail", id],
-      ["users", "list"],
-    ],
-    successMessage: "Account status updated",
+    queryFn: () => usersApi.get(id),
   });
 
   if (isLoading) {
     return (
       <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
-        <div className="flex items-center gap-3">
-          <Skeleton className="h-10 w-10 rounded-lg" />
-          <Skeleton className="h-6 w-48" />
-        </div>
-        <Skeleton className="h-[200px] w-full rounded-lg" />
-        <Skeleton className="h-[400px] w-full rounded-lg" />
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-48 w-full rounded-lg" />
+        <Skeleton className="h-64 w-full rounded-lg" />
       </div>
     );
   }
@@ -143,157 +77,95 @@ export default function UserDetailPage({
     );
   }
 
-  const accountConfig = ACCOUNT_STATUS_CONFIG[user.status];
-  const AccountIcon = accountConfig?.icon ?? AlertCircle;
-  const kycConfig = KYC_LEVEL_CONFIG[user.kycLevel];
-  const KycIcon = kycConfig?.icon ?? Info;
-
   return (
     <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
-      {/* Back + Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex items-start gap-4">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => router.push("/users")}
-            className="mt-1"
-          >
+        <div className="flex items-start gap-3">
+          <Button variant="ghost" size="icon" onClick={() => router.push("/users")}>
             <ArrowLeft className="size-4" />
           </Button>
           <div className="flex flex-col gap-1">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              {getFullName(user)}
-            </h1>
-            <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-              <span>{user.email}</span>
-              <span className="hidden h-1 w-1 rounded-full bg-border sm:inline-block" />
-              <span className="font-mono">{user.phone}</span>
-              {user.jjsTag && (
-                <>
-                  <span className="hidden h-1 w-1 rounded-full bg-border sm:inline-block" />
-                  <span>@{user.jjsTag}</span>
-                </>
-              )}
+            <h1 className="text-2xl font-semibold tracking-tight">{user.fullName}</h1>
+            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <StatusBadge value={user.accountStatus} config={USER_ACCOUNT_STATUS} />
+              <StatusBadge value={user.kycStatus} config={KYC_STATUS} />
             </div>
           </div>
         </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          {accountConfig && (
-            <Badge
-              variant="outline"
-              className={`gap-1 ${accountConfig.className} text-sm px-2.5 py-0.5`}
-            >
-              <AccountIcon className="size-3.5" />
-              {accountConfig.label}
-            </Badge>
-          )}
-
-          <div className="flex gap-2">
-            {user.status === "active" ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-orange-600 hover:text-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950/50"
-                onClick={() => updateStatusMutation.mutate("suspended")}
-                disabled={updateStatusMutation.isPending}
-              >
-                Suspend
-              </Button>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 dark:hover:bg-emerald-950/50"
-                onClick={() => updateStatusMutation.mutate("active")}
-                disabled={updateStatusMutation.isPending}
-              >
-                Reactivate
-              </Button>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/50"
-              onClick={() => updateStatusMutation.mutate("flagged")}
-              disabled={
-                user.status === "flagged" ||
-                updateStatusMutation.isPending
-              }
-            >
-              Flag
-            </Button>
-          </div>
-        </div>
+        <ChangeStatusDialog userId={id} current={user.accountStatus} />
       </div>
 
-      {/* Profile Cards */}
       <div className="grid gap-6 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">
-              Personal Information
-            </CardTitle>
+            <CardTitle className="text-base">Profile</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4">
-            <InfoRow icon={User} label="First Name" value={user.firstName} />
-            {user.middleName && (
-              <InfoRow icon={User} label="Middle Name" value={user.middleName} />
-            )}
-            <InfoRow icon={User} label="Last Name" value={user.lastName} />
-            <InfoRow icon={Mail} label="Email Address" value={user.email} />
-            <InfoRow icon={Phone} label="Phone Number" value={user.phone} />
-            {user.jjsTag && (
-              <InfoRow icon={Tag} label="JJS Tag" value={`@${user.jjsTag}`} />
-            )}
+            <InfoRow icon={User} label="Full name" value={user.fullName} />
+            <InfoRow icon={Mail} label="Email" value={user.email} />
+            <InfoRow icon={Phone} label="Phone" value={user.phone} />
+            <InfoRow
+              icon={Calendar}
+              label="Member since"
+              value={new Date(user.createdAt).toLocaleDateString("en-GB")}
+            />
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Account Details</CardTitle>
+            <CardTitle className="text-base">Balances</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-4">
-            <div className="flex items-center justify-between text-sm">
-              <div className="flex items-center gap-3 text-muted-foreground">
-                <Shield className="size-4" />
-                <span>KYC Level</span>
-              </div>
-              <div className="flex items-center gap-1.5 font-medium">
-                {kycConfig && (
-                  <>
-                    <KycIcon className={`size-4 ${kycConfig.className}`} />
-                    <span className={kycConfig.className}>
-                      {kycConfig.label}
-                    </span>
-                  </>
-                )}
-              </div>
-            </div>
-            <InfoRow icon={Hash} label="Role" value={user.role} />
-            <InfoRow
-              icon={Activity}
-              label="PIN Set"
-              value={user.pin ? "Yes" : "No"}
-            />
-            <InfoRow
-              icon={Calendar}
-              label="Member Since"
-              value={new Date(user.createdAt).toLocaleDateString("en-GB")}
-            />
-            {user.lastLogin && (
-              <InfoRow
-                icon={Clock}
-                label="Last Login"
-                value={new Date(user.lastLogin).toLocaleString("en-GB", {
-                  dateStyle: "medium",
-                  timeStyle: "short",
-                })}
-              />
+            {user.fiatBalances.length === 0 && user.cryptoBalances.length === 0 && (
+              <p className="text-sm text-muted-foreground">No balances</p>
             )}
+            {user.fiatBalances.map((b) => (
+              <div key={b.currency} className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">{b.currency}</span>
+                <span className="font-mono font-medium">
+                  {formatMoney(b.available, b.currency)}
+                </span>
+              </div>
+            ))}
+            {user.cryptoBalances.map((b) => (
+              <div key={b.asset} className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">{b.asset}</span>
+                <span className="text-right font-mono font-medium">
+                  {formatAmount(b.available, b.asset)} {b.asset}
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    (${formatAmount(b.usdValue, "USD")})
+                  </span>
+                </span>
+              </div>
+            ))}
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Linked devices</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {user.deviceFingerprints.length === 0 && (
+              <p className="text-sm text-muted-foreground">No devices on record</p>
+            )}
+            {user.deviceFingerprints.map((d) => (
+              <div key={d.id} className="flex items-center gap-3 text-sm">
+                <Smartphone className="size-4 text-muted-foreground" />
+                <div className="flex flex-col">
+                  <span className="font-medium">{d.deviceName}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {d.platform} · last seen{" "}
+                    {new Date(d.lastSeenAt).toLocaleDateString("en-GB")}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <NotesPanel userId={id} />
       </div>
     </div>
   );
@@ -314,7 +186,168 @@ function InfoRow({
         <Icon className="size-4 shrink-0" />
         <span>{label}</span>
       </div>
-      <span className="font-medium text-right">{value}</span>
+      <span className="text-right font-medium">{value}</span>
     </div>
+  );
+}
+
+function ChangeStatusDialog({
+  userId,
+  current,
+}: {
+  userId: string;
+  current: UserAccountStatus;
+}) {
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<UserAccountStatus>(current);
+  const [reason, setReason] = useState("");
+
+  const mutation = useAuditedMutation({
+    action: "update_user_status",
+    mutationFn: () => usersApi.updateStatus(userId, { status, reason }),
+    invalidateKeys: [
+      ["users", "detail", userId],
+      ["users", "list"],
+    ],
+    successMessage: "Account status updated",
+    onSuccess: () => {
+      setOpen(false);
+      setReason("");
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger>
+        <Button variant="outline" size="sm">
+          Change status
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Change account status</DialogTitle>
+          <DialogDescription>
+            A reason is required and recorded in the audit log.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-2">
+          <Select value={status} onValueChange={(v) => setStatus(v as UserAccountStatus)}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {STATUS_OPTIONS.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {USER_ACCOUNT_STATUS[s].label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Textarea
+            placeholder="Reason (required)"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              if (!reason.trim()) {
+                toast.error("A reason is required");
+                return;
+              }
+              mutation.mutate();
+            }}
+            disabled={mutation.isPending}
+          >
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function NotesPanel({ userId }: { userId: string }) {
+  const [content, setContent] = useState("");
+  const { data: notes } = useQuery({
+    queryKey: ["users", "notes", userId],
+    queryFn: () => usersApi.listNotes(userId, { limit: 50 }),
+  });
+
+  const createNote = useAuditedMutation({
+    action: "create_user_note",
+    mutationFn: () => usersApi.createNote(userId, { content }),
+    invalidateKeys: [["users", "notes", userId]],
+    successMessage: "Note added",
+    onSuccess: () => setContent(""),
+  });
+
+  const deleteNote = useAuditedMutation({
+    action: "delete_user_note",
+    mutationFn: (noteId: string) => usersApi.deleteNote(userId, noteId),
+    invalidateKeys: [["users", "notes", userId]],
+    successMessage: "Note deleted",
+  });
+
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader>
+        <CardTitle className="text-base">Internal notes</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <div className="flex flex-col gap-2">
+          <Textarea
+            placeholder="Add an internal note (never visible to the user)…"
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            maxLength={2000}
+          />
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              onClick={() => content.trim() && createNote.mutate()}
+              disabled={!content.trim() || createNote.isPending}
+            >
+              Add note
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex flex-col divide-y">
+          {(notes?.data ?? []).filter((n) => !n.deletedAt).length === 0 && (
+            <p className="py-2 text-sm text-muted-foreground">No notes yet</p>
+          )}
+          {(notes?.data ?? [])
+            .filter((n) => !n.deletedAt)
+            .map((note) => (
+              <div key={note.id} className="flex items-start justify-between gap-4 py-3">
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm">{note.content}</p>
+                  <span className="text-xs text-muted-foreground">
+                    {note.adminEmail} ·{" "}
+                    {new Date(note.createdAt).toLocaleString("en-GB", {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    })}
+                  </span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={() => deleteNote.mutate(note.id)}
+                  disabled={deleteNote.isPending}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
+            ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }

@@ -20,6 +20,7 @@ export const ROUTE_ACCESS_MAP: { prefix: string; roles: Role[] }[] = [
 
   // Compliance
   { prefix: "/kyc", roles: [ROLES.SUPER_ADMIN, ROLES.COMPLIANCE_OFFICER] },
+  { prefix: "/risk", roles: [ROLES.SUPER_ADMIN, ROLES.COMPLIANCE_OFFICER] },
   {
     prefix: "/users",
     roles: [
@@ -63,10 +64,10 @@ export const ROUTE_ACCESS_MAP: { prefix: string; roles: Role[] }[] = [
   // Analytics — read access for all
   { prefix: "/analytics", roles: ALL_ROLES },
 
-  // Audit logs — compliance + super admin
+  // Audit log — SUPER_ADMIN only (GET /analytics/audit-log)
   {
     prefix: "/audit",
-    roles: [ROLES.SUPER_ADMIN, ROLES.COMPLIANCE_OFFICER],
+    roles: [ROLES.SUPER_ADMIN],
   },
 
   // Dashboard — accessible to all authenticated roles
@@ -76,13 +77,20 @@ export const ROUTE_ACCESS_MAP: { prefix: string; roles: Role[] }[] = [
 /**
  * Public routes that don't require authentication
  */
-export const PUBLIC_ROUTES = ["/login", "/unauthorised", "/forgot-password"];
+export const PUBLIC_ROUTES = [
+  "/login",
+  "/unauthorised",
+  "/activate",
+  "/change-password",
+];
 
 /**
- * Check if any of the admin's permissions grant access to a given pathname
+ * Check whether the admin's single role grants access to a given pathname.
  */
-export function hasAccess(permissions: Role[], pathname: string): boolean {
-  // Find the first matching route prefix
+export function hasAccess(role: Role | null | undefined, pathname: string): boolean {
+  if (!role) return false;
+
+  // Find the first (most specific) matching route prefix
   const match = ROUTE_ACCESS_MAP.find((route) =>
     pathname.startsWith(route.prefix)
   );
@@ -90,8 +98,7 @@ export function hasAccess(permissions: Role[], pathname: string): boolean {
   // If no match found, deny access by default
   if (!match) return false;
 
-  // Check if at least one permission matches
-  return permissions.some((perm) => match.roles.includes(perm));
+  return match.roles.includes(role);
 }
 
 /**

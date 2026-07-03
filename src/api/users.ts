@@ -1,109 +1,80 @@
 /**
- * Users API module — aligned with openapi.yaml admin endpoints
- * GET  /user/admin/users       — list all users (paginated)
- * GET  /user/admin/users/{id}  — get single user
- * PATCH /user/admin/users/{id} — update user account status
+ * Users API — read-only lookup, status management, and internal notes.
+ * See openapi-admin.yaml › Users.
  */
 
 import { apiClient } from "./client";
+import { cleanParams, type Paginated } from "./types";
 import type {
-  PaginatedResponse,
-  PaginationParams,
-  ApiResponse,
-  AccountStatus,
-  KycLevel,
-  UserRole,
-} from "./types";
+  UserSummary,
+  UserDetail,
+  UserNoteView,
+  PaginatedUsers,
+  PaginatedNotes,
+  UpdateUserStatusRequest,
+  CreateNoteRequest,
+  UserAccountStatus,
+  KycStatus,
+} from "./schema";
 
-// ── Types — matches UserProfile schema in openapi.yaml ───────────────────────
-
-export interface UserProfile {
-  id: string;
-  email: string;
-  firstName: string;
-  middleName?: string | null;
-  lastName: string;
-  phone: string;
-  kycLevel: KycLevel;
-  role: UserRole;
-  status: AccountStatus;
-  pin?: string | null;
-  jjsTag?: string | null;
-  image?: string | null;
-  bvn?: string | null;
-  youCandidateId?: string | null;
-  lastLogin?: string | null;
-  createdAt: string;
+export interface UserListParams {
+  q?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  walletAddress?: string;
+  kyc_status?: KycStatus;
+  account_status?: UserAccountStatus;
+  cursor?: string;
+  limit?: number;
 }
-
-/** Sort options accepted by the API */
-export type UserSortOption =
-  | "createdAt:asc"
-  | "createdAt:desc"
-  | "lastName:asc"
-  | "lastName:desc";
-
-export type UserListParams = PaginationParams & {
-  status?: AccountStatus;
-  sort?: UserSortOption;
-};
-
-// ── Derived helpers ──────────────────────────────────────────────────────────
-
-/** Build display-friendly full name from the UserProfile fields */
-export function getFullName(user: UserProfile): string {
-  return [user.firstName, user.middleName, user.lastName]
-    .filter(Boolean)
-    .join(" ");
-}
-
-/** Human-readable KYC level label */
-export const KYC_LEVEL_LABELS: Record<KycLevel, string> = {
-  "0": "Unverified",
-  "1": "Phone Verified",
-  "2": "BVN Verified",
-  "3": "Fully Verified",
-};
-
-// ── API methods ──────────────────────────────────────────────────────────────
 
 export const usersApi = {
-  /**
-   * Fetch paginated user directory
-   * GET /user/admin/users
-   */
-  getUsers: async (
-    params?: UserListParams,
-  ): Promise<PaginatedResponse<UserProfile>> => {
-    const response = await apiClient.get<PaginatedResponse<UserProfile>>(
-      "/user/admin/users",
-      { params },
-    );
-    return response.data;
-  },
-
-  /**
-   * Fetch single user by ID
-   * GET /user/admin/users/{id}
-   */
-  getUser: async (id: string): Promise<ApiResponse<UserProfile>> => {
-    const response = await apiClient.get<ApiResponse<UserProfile>>(
-      `/user/admin/users/${id}`,
-    );
-    return response.data;
-  },
-
-  /**
-   * Update a user's account status (admin only)
-   * PATCH /user/admin/users/{id}
-   */
-  updateStatus: async (
-    id: string,
-    status: AccountStatus,
-  ): Promise<{ success: boolean; message: string }> => {
-    const response = await apiClient.patch(`/user/admin/users/${id}`, {
-      status,
+  /** GET /users — cursor-paginated, filterable user directory. */
+  list: async (params: UserListParams = {}): Promise<Paginated<UserSummary>> => {
+    const res = await apiClient.get<PaginatedUsers>("/users", {
+      params: cleanParams(params),
     });
-    return response.data;
+    return res.data as Paginated<UserSummary>;
+  },
+
+  /** GET /users/{userId} — full profile with balances, devices, notes. */
+  get: async (userId: string): Promise<UserDetail> => {
+    const res = await apiClient.get<UserDetail>(`/users/${userId}`);
+    return res.data;
+  },
+
+  /** PATCH /users/{userId}/status — ACTIVE | FROZEN | SHADOW_BANNED (+ reason). */
+  updateStatus: async (
+    userId: string,
+    body: UpdateUserStatusRequest,
+  ): Promise<UserSummary> => {
+    const res = await apiClient.patch<UserSummary>(`/users/${userId}/status`, body);
+    return res.data;
+  },
+
+  /** GET /users/{userId}/notes — cursor-paginated admin notes, newest first. */
+  listNotes: async (
+    userId: string,
+    params: { cursor?: string; limit?: number } = {},
+  ): Promise<Paginated<UserNoteView>> => {
+    const res = await apiClient.get<PaginatedNotes>(`/users/${userId}/notes`, {
+      params: cleanParams(params),
+    });
+    return res.data as Paginated<UserNoteView>;
+  },
+
+  /** POST /users/{userId}/notes — add an internal admin note (max 2000 chars). */
+  createNote: async (
+    userId: string,
+    body: CreateNoteRequest,
+  ): Promise<UserNoteView> => {
+    const res = await apiClient.post<UserNoteView>(`/users/${userId}/notes`, body);
+    return res.data;
+  },
+
+  /** DELETE /users/{userId}/notes/{noteId} — soft-delete a note. */
+  deleteNote: async (userId: string, noteId: string): Promise<void> => {
+    await apiClient.delete(`/users/${userId}/notes/${noteId}`);
   },
 };

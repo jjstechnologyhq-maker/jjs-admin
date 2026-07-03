@@ -2,16 +2,7 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  Coins,
-  CheckCircle2,
-  XCircle,
-  Percent,
-  Settings2,
-  Save,
-  Loader2,
-  TrendingUp,
-} from "lucide-react";
+import { Coins, Plus, Save, Loader2, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +17,21 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -34,22 +40,20 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Slider } from "@/components/ui/slider";
 
-import { feesApi, type AssetRate, type AssetToggle } from "@/api/fees";
+import { pricingApi } from "@/api/pricing";
+import type {
+  AssetSpreadResponse,
+  AssetResponse,
+  FeeRuleTypeEnum,
+  FeeCalculationTypeEnum,
+} from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
 
+const FEE_TYPES: FeeRuleTypeEnum[] = ["WITHDRAWAL", "SWAP", "VAS"];
+const FEE_CALC: FeeCalculationTypeEnum[] = ["FLAT", "PERCENTAGE"];
+
 export default function PricingPage() {
-  const { data: rates, isLoading: isLoadingRates } = useQuery({
-    queryKey: ["pricing", "rates"],
-    queryFn: () => feesApi.getRates(),
-  });
-
-  const { data: assets, isLoading: isLoadingAssets } = useQuery({
-    queryKey: ["pricing", "assets"],
-    queryFn: () => feesApi.getAssetToggles(),
-  });
-
   return (
     <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
       <div className="flex items-center gap-3">
@@ -59,153 +63,104 @@ export default function PricingPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Pricing & Fees</h1>
           <p className="text-sm text-muted-foreground">
-            Configure market spreads, asset availability, and platform fees
+            Configure asset-pair spreads, fee rules, and asset availability
           </p>
         </div>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-2">
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Exchange Rates & Spread</CardTitle>
-              <CardDescription>Adjust the platform spread markup over live market rates</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-hidden rounded-lg border">
-                <Table>
-                  <TableHeader className="bg-muted/50">
-                    <TableRow>
-                      <TableHead>Asset</TableHead>
-                      <TableHead className="text-right">Market</TableHead>
-                      <TableHead className="text-right">Platform</TableHead>
-                      <TableHead className="text-right w-[150px]">Spread</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {isLoadingRates ? (
-                      Array.from({ length: 3 }).map((_, i) => (
-                        <TableRow key={i}>
-                          <TableCell><Skeleton className="h-4 w-12" /></TableCell>
-                          <TableCell className="text-right"><Skeleton className="h-4 w-16 ml-auto" /></TableCell>
-                          <TableCell className="text-right"><Skeleton className="h-4 w-16 ml-auto" /></TableCell>
-                          <TableCell className="text-right"><Skeleton className="h-8 w-full" /></TableCell>
-                        </TableRow>
-                      ))
-                    ) : rates?.map((rate) => (
-                      <SpreadRow key={rate.asset} rate={rate} />
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Platform Fees</CardTitle>
-              <CardDescription>Global flat and percentage fees</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-center py-8 text-muted-foreground">
-                <p className="text-sm">Fee tiers configuration coming soon...</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Asset Availability</CardTitle>
-              <CardDescription>Enable or disable core operations per asset globally</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-hidden rounded-lg border">
-                <Table>
-                  <TableHeader className="bg-muted/50">
-                    <TableRow>
-                      <TableHead>Asset</TableHead>
-                      <TableHead className="text-center">Trading</TableHead>
-                      <TableHead className="text-center">Deposits</TableHead>
-                      <TableHead className="text-center">Withdrawals</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {isLoadingAssets ? (
-                      Array.from({ length: 4 }).map((_, i) => (
-                        <TableRow key={i}>
-                          <TableCell><Skeleton className="h-4 w-12" /></TableCell>
-                          <TableCell className="text-center"><Skeleton className="h-5 w-8 mx-auto rounded-full" /></TableCell>
-                          <TableCell className="text-center"><Skeleton className="h-5 w-8 mx-auto rounded-full" /></TableCell>
-                          <TableCell className="text-center"><Skeleton className="h-5 w-8 mx-auto rounded-full" /></TableCell>
-                        </TableRow>
-                      ))
-                    ) : assets?.map((asset) => (
-                      <AssetToggleRow key={asset.asset} asset={asset} />
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        <SpreadsCard />
+        <AssetsCard />
+        <FeesCard />
       </div>
     </div>
   );
 }
 
-function SpreadRow({ rate }: { rate: AssetRate }) {
-  const [spread, setSpread] = React.useState(rate.spreadPercent);
-  const isDirty = spread !== rate.spreadPercent;
+// ── Spreads ───────────────────────────────────────────────────────────────────
 
-  const platformRate = rate.marketRate * (1 + spread / 100);
+function SpreadsCard() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["pricing", "spreads"],
+    queryFn: () => pricingApi.listSpreads(),
+  });
 
-  const updateSpreadMutation = useAuditedMutation({
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <div>
+          <CardTitle className="text-lg">Asset Pair Spreads</CardTitle>
+          <CardDescription>Markup applied over market rates</CardDescription>
+        </div>
+        <CreateSpreadDialog />
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-hidden rounded-lg border">
+          <Table>
+            <TableHeader className="bg-muted/50">
+              <TableRow>
+                <TableHead>Pair</TableHead>
+                <TableHead className="w-[220px] text-right">Spread</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {isLoading ? (
+                Array.from({ length: 3 }).map((_, i) => (
+                  <TableRow key={i}>
+                    <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                    <TableCell><Skeleton className="ml-auto h-8 w-32" /></TableCell>
+                  </TableRow>
+                ))
+              ) : data?.length ? (
+                data.map((s) => <SpreadRow key={s.id} spread={s} />)
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={2} className="h-20 text-center text-sm text-muted-foreground">
+                    No spreads configured
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SpreadRow({ spread }: { spread: AssetSpreadResponse }) {
+  const [value, setValue] = React.useState(spread.spread);
+  const dirty = value !== spread.spread;
+
+  const mutation = useAuditedMutation({
     action: "update_spread",
-    mutationFn: () => feesApi.updateSpread({ asset: rate.asset, spreadPercent: spread }),
-    invalidateKeys: [["pricing", "rates"]],
-    successMessage: `${rate.asset} spread updated`,
+    mutationFn: () => pricingApi.updateSpread(spread.assetPair, { spread: parseFloat(value) }),
+    invalidateKeys: [["pricing", "spreads"]],
+    successMessage: `${spread.assetPair} spread updated`,
   });
 
   return (
     <TableRow>
+      <TableCell className="font-medium">{spread.assetPair}</TableCell>
       <TableCell>
-        <div className="flex items-center gap-2">
-          <div className="flex size-6 items-center justify-center rounded-full bg-secondary text-xs font-medium">
-            {rate.asset[0]}
-          </div>
-          <span className="font-medium">{rate.asset}</span>
-        </div>
-      </TableCell>
-      <TableCell className="text-right font-mono text-muted-foreground text-sm">
-        ${rate.marketRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
-      </TableCell>
-      <TableCell className="text-right font-mono font-medium text-sm">
-        ${platformRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
-      </TableCell>
-      <TableCell>
-        <div className="flex items-center gap-3 justify-end">
-          <div className="flex items-center gap-2 flex-1 max-w-[100px]">
-            <span className="text-xs w-8 text-right font-medium">{spread.toFixed(1)}%</span>
-            <Slider
-              value={[spread]}
-              min={0}
-              max={5}
-              step={0.1}
-              onValueChange={(vals) => setSpread(Array.isArray(vals) ? vals[0] : (vals as unknown as number))}
-              className="flex-1"
-            />
-          </div>
-          {isDirty && (
+        <div className="flex items-center justify-end gap-2">
+          <Input
+            type="number"
+            step="any"
+            min="0"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            className="h-8 w-28 text-right"
+          />
+          {dirty && (
             <Button
               size="icon"
               variant="ghost"
-              className="size-6 h-6 w-6 text-primary hover:text-primary hover:bg-primary/10"
-              onClick={() => updateSpreadMutation.mutate()}
-              disabled={updateSpreadMutation.isPending}
+              className="size-8 text-primary"
+              onClick={() => mutation.mutate()}
+              disabled={mutation.isPending}
             >
-              {updateSpreadMutation.isPending ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+              {mutation.isPending ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
             </Button>
           )}
         </div>
@@ -214,47 +169,342 @@ function SpreadRow({ rate }: { rate: AssetRate }) {
   );
 }
 
-function AssetToggleRow({ asset }: { asset: AssetToggle }) {
-  const updateToggleMutation = useAuditedMutation({
-    action: "update_asset_toggle",
-    mutationFn: (updates: Partial<AssetToggle>) => feesApi.updateAssetToggle(asset.asset, updates),
-    invalidateKeys: [["pricing", "assets"]],
-    successMessage: `${asset.asset} configuration updated`,
+function CreateSpreadDialog() {
+  const [open, setOpen] = React.useState(false);
+  const [assetPair, setAssetPair] = React.useState("");
+  const [spread, setSpread] = React.useState("");
+
+  const mutation = useAuditedMutation({
+    action: "create_spread",
+    mutationFn: () => pricingApi.createSpread({ assetPair, spread: parseFloat(spread) }),
+    invalidateKeys: [["pricing", "spreads"]],
+    successMessage: "Spread created",
+    onSuccess: () => {
+      setOpen(false);
+      setAssetPair("");
+      setSpread("");
+    },
   });
 
-  const handleToggle = (key: keyof Omit<AssetToggle, "asset">, checked: boolean) => {
-    updateToggleMutation.mutate({ [key]: checked });
-  };
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger>
+        <Button variant="outline" size="sm" className="gap-1">
+          <Plus className="size-4" />
+          Add
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New asset pair spread</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-4 py-2">
+          <div className="grid gap-2">
+            <Label htmlFor="pair">Asset pair</Label>
+            <Input id="pair" placeholder="BTC/NGN" value={assetPair} onChange={(e) => setAssetPair(e.target.value)} />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="spread">Spread</Label>
+            <Input id="spread" type="number" step="any" min="0" value={spread} onChange={(e) => setSpread(e.target.value)} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => assetPair && spread && mutation.mutate()} disabled={!assetPair || !spread || mutation.isPending}>
+            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Assets ────────────────────────────────────────────────────────────────────
+
+function AssetsCard() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["pricing", "assets"],
+    queryFn: () => pricingApi.listAssets(),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <div>
+          <CardTitle className="text-lg">Asset Availability</CardTitle>
+          <CardDescription>Enable or disable assets platform-wide</CardDescription>
+        </div>
+        <CreateAssetDialog />
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-hidden rounded-lg border">
+          <Table>
+            <TableHeader className="bg-muted/50">
+              <TableRow>
+                <TableHead>Asset</TableHead>
+                <TableHead className="text-center">Enabled</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {isLoading ? (
+                Array.from({ length: 4 }).map((_, i) => (
+                  <TableRow key={i}>
+                    <TableCell><Skeleton className="h-4 w-12" /></TableCell>
+                    <TableCell className="text-center"><Skeleton className="mx-auto h-5 w-8 rounded-full" /></TableCell>
+                  </TableRow>
+                ))
+              ) : data?.length ? (
+                data.map((a) => <AssetRow key={a.id} asset={a} />)
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={2} className="h-20 text-center text-sm text-muted-foreground">
+                    No assets registered
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AssetRow({ asset }: { asset: AssetResponse }) {
+  const mutation = useAuditedMutation({
+    action: "toggle_asset",
+    mutationFn: (enabled: boolean) => pricingApi.toggleAsset(asset.asset, { enabled }),
+    invalidateKeys: [["pricing", "assets"]],
+    successMessage: `${asset.asset} updated`,
+  });
 
   return (
     <TableRow>
-      <TableCell>
-        <span className="font-medium">{asset.asset}</span>
-      </TableCell>
+      <TableCell className="font-medium">{asset.asset}</TableCell>
       <TableCell className="text-center">
         <Switch
-          checked={asset.tradingEnabled}
-          onCheckedChange={(v) => handleToggle("tradingEnabled", v)}
-          disabled={updateToggleMutation.isPending}
-          className="scale-90"
-        />
-      </TableCell>
-      <TableCell className="text-center">
-        <Switch
-          checked={asset.depositsEnabled}
-          onCheckedChange={(v) => handleToggle("depositsEnabled", v)}
-          disabled={updateToggleMutation.isPending}
-          className="scale-90"
-        />
-      </TableCell>
-      <TableCell className="text-center">
-        <Switch
-          checked={asset.withdrawalsEnabled}
-          onCheckedChange={(v) => handleToggle("withdrawalsEnabled", v)}
-          disabled={updateToggleMutation.isPending}
+          checked={asset.enabled}
+          onCheckedChange={(v) => mutation.mutate(!!v)}
+          disabled={mutation.isPending}
           className="scale-90"
         />
       </TableCell>
     </TableRow>
+  );
+}
+
+function CreateAssetDialog() {
+  const [open, setOpen] = React.useState(false);
+  const [asset, setAsset] = React.useState("");
+
+  const mutation = useAuditedMutation({
+    action: "create_asset",
+    mutationFn: () => pricingApi.createAsset({ asset: asset.toUpperCase() }),
+    invalidateKeys: [["pricing", "assets"]],
+    successMessage: "Asset created",
+    onSuccess: () => {
+      setOpen(false);
+      setAsset("");
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger>
+        <Button variant="outline" size="sm" className="gap-1">
+          <Plus className="size-4" />
+          Add
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Register asset</DialogTitle>
+        </DialogHeader>
+        <Input placeholder="BTC" value={asset} onChange={(e) => setAsset(e.target.value)} />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => asset && mutation.mutate()} disabled={!asset || mutation.isPending}>
+            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Fees ──────────────────────────────────────────────────────────────────────
+
+function FeesCard() {
+  const { data, isLoading } = useQuery({
+    queryKey: ["pricing", "fees"],
+    queryFn: () => pricingApi.listFees(),
+  });
+
+  const deactivate = useAuditedMutation({
+    action: "deactivate_fee",
+    mutationFn: (feeId: string) => pricingApi.deactivateFee(feeId),
+    invalidateKeys: [["pricing", "fees"]],
+    successMessage: "Fee rule deactivated",
+  });
+
+  return (
+    <Card className="xl:col-span-2">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <div>
+          <CardTitle className="text-lg">Fee Rules</CardTitle>
+          <CardDescription>Active fee rules by transaction type</CardDescription>
+        </div>
+        <CreateFeeDialog />
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-hidden rounded-lg border">
+          <Table>
+            <TableHeader className="bg-muted/50">
+              <TableRow>
+                <TableHead>Type</TableHead>
+                <TableHead>Calculation</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
+                <TableHead>Tier</TableHead>
+                <TableHead>Asset</TableHead>
+                <TableHead className="text-right">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {isLoading ? (
+                Array.from({ length: 3 }).map((_, i) => (
+                  <TableRow key={i}>
+                    {Array.from({ length: 6 }).map((_, j) => (
+                      <TableCell key={j}><Skeleton className="h-4 w-full" /></TableCell>
+                    ))}
+                  </TableRow>
+                ))
+              ) : data?.length ? (
+                data.map((f) => (
+                  <TableRow key={f.id}>
+                    <TableCell>
+                      <Badge variant="outline">{f.type}</Badge>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{f.feeType}</TableCell>
+                    <TableCell className="text-right font-mono">
+                      {f.amount}
+                      {f.feeType === "PERCENTAGE" ? "%" : ""}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{f.tier ?? "—"}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{f.asset ?? "—"}</TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => deactivate.mutate(f.id)}
+                        disabled={deactivate.isPending}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
+                    No active fee rules
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CreateFeeDialog() {
+  const [open, setOpen] = React.useState(false);
+  const [type, setType] = React.useState<FeeRuleTypeEnum>("WITHDRAWAL");
+  const [feeType, setFeeType] = React.useState<FeeCalculationTypeEnum>("FLAT");
+  const [amount, setAmount] = React.useState("");
+  const [tier, setTier] = React.useState("");
+  const [asset, setAsset] = React.useState("");
+
+  const mutation = useAuditedMutation({
+    action: "create_fee",
+    mutationFn: () =>
+      pricingApi.createFee({
+        type,
+        feeType,
+        amount: parseFloat(amount),
+        tier: tier || undefined,
+        asset: asset || undefined,
+      }),
+    invalidateKeys: [["pricing", "fees"]],
+    successMessage: "Fee rule created",
+    onSuccess: () => {
+      setOpen(false);
+      setAmount("");
+      setTier("");
+      setAsset("");
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger>
+        <Button variant="outline" size="sm" className="gap-1">
+          <Plus className="size-4" />
+          Add fee
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New fee rule</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-4 py-2">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-2">
+              <Label>Type</Label>
+              <Select value={type} onValueChange={(v) => setType(v as FeeRuleTypeEnum)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {FEE_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label>Calculation</Label>
+              <Select value={feeType} onValueChange={(v) => setFeeType(v as FeeCalculationTypeEnum)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {FEE_CALC.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="fee-amount">Amount</Label>
+            <Input id="fee-amount" type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="fee-tier">Tier (optional)</Label>
+              <Input id="fee-tier" value={tier} onChange={(e) => setTier(e.target.value)} />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="fee-asset">Asset (optional)</Label>
+              <Input id="fee-asset" value={asset} onChange={(e) => setAsset(e.target.value)} />
+            </div>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button onClick={() => amount && mutation.mutate()} disabled={!amount || mutation.isPending}>
+            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

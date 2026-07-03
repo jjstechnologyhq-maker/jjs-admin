@@ -1,81 +1,43 @@
 /**
- * VAS Management API module
- * PRD §6.6 — Value Added Services Management
+ * VAS API — provider and product management.
+ * See openapi-admin.yaml › VAS.
  */
 
 import { apiClient } from "./client";
-import type { VasProductStatus } from "./types";
-
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface VasProvider {
-  id: string;
-  name: string;
-  status: "ONLINE" | "OFFLINE" | "DEGRADED";
-  balance: number;
-  currency: string;
-  lastChecked: string;
-  uptimePercent: number;
-}
-
-export interface VasProduct {
-  id: string;
-  name: string;
-  providerId: string;
-  providerName: string;
-  category: string;
-  status: VasProductStatus;
-  transactionCount: number;
-  lastUsed: string;
-}
-
-export interface VasTransaction {
-  id: string;
-  productName: string;
-  userId: string;
-  userName: string;
-  amount: number;
-  status: "SUCCESS" | "FAILED" | "PENDING" | "REFUNDED";
-  providerRef: string;
-  createdAt: string;
-  retryable: boolean;
-}
-
-// ── API methods ──────────────────────────────────────────────────────────────
+import type {
+  VasProviderResponse,
+  VasProductResponse,
+  CreateVasProviderRequest,
+  CreateVasProductRequest,
+  ToggleRequest,
+} from "./schema";
 
 export const vasApi = {
-  /** Fetch all VAS providers with status */
-  getProviders: async (): Promise<VasProvider[]> => {
-    const response = await apiClient.get<VasProvider[]>("/vas/providers");
-    return response.data;
+  // ── Providers ──────────────────────────────────────────────────────────────
+  listProviders: async (): Promise<VasProviderResponse[]> => {
+    const res = await apiClient.get<VasProviderResponse[]>("/vas/providers");
+    return res.data;
+  },
+  createProvider: async (body: CreateVasProviderRequest): Promise<VasProviderResponse> => {
+    const res = await apiClient.post<VasProviderResponse>("/vas/providers", body);
+    return res.data;
+  },
+  toggleProvider: async (id: string, body: ToggleRequest): Promise<VasProviderResponse> => {
+    const res = await apiClient.patch<VasProviderResponse>(`/vas/providers/${id}/toggle`, body);
+    return res.data;
   },
 
-  /** Fetch all VAS products */
-  getProducts: async (): Promise<VasProduct[]> => {
-    const response = await apiClient.get<VasProduct[]>("/vas/products");
-    return response.data;
+  // ── Products ─────────────────────────────────────────────────────────────────
+  listProducts: async (): Promise<VasProductResponse[]> => {
+    const res = await apiClient.get<VasProductResponse[]>("/vas/products");
+    return res.data;
   },
-
-  /** Toggle a VAS product on/off */
-  toggleProduct: async (
-    id: string,
-    status: VasProductStatus
-  ): Promise<{ success: boolean }> => {
-    const response = await apiClient.patch(`/vas/products/${id}/toggle`, {
-      status,
-    });
-    return response.data;
+  createProduct: async (body: CreateVasProductRequest): Promise<VasProductResponse> => {
+    const res = await apiClient.post<VasProductResponse>("/vas/products", body);
+    return res.data;
   },
-
-  /** Retry a failed VAS transaction */
-  retryTransaction: async (id: string): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(`/vas/transactions/${id}/retry`);
-    return response.data;
-  },
-
-  /** Refund a failed VAS transaction */
-  refundTransaction: async (id: string): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(`/vas/transactions/${id}/refund`);
-    return response.data;
+  toggleProduct: async (id: string, body: ToggleRequest): Promise<VasProductResponse> => {
+    const res = await apiClient.patch<VasProductResponse>(`/vas/products/${id}/toggle`, body);
+    return res.data;
   },
 };

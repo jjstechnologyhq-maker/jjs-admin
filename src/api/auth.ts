@@ -1,66 +1,62 @@
 /**
- * Auth API module — aligned with openapi.yaml
- * Uses /user/signin and /user/refresh endpoints
+ * Auth API — JJS Admin Service two-step login + TOTP MFA.
+ *
+ * Flow: POST /auth/login (password) → POST /auth/totp/verify (6-digit code) → JWT pair.
+ * See openapi-admin.yaml › Auth for the full contract.
  */
 
 import { apiClient } from "./client";
-import type { ApiResponse } from "./types";
+import type {
+  LoginRequest,
+  LoginResult,
+  TotpVerifyRequest,
+  TokenResponse,
+  ForcePasswordChangeResponse,
+  TotpSetupResult,
+  TotpConfirmRequest,
+  ChangePasswordRequest,
+} from "./schema";
 
-// ── Types ────────────────────────────────────────────────────────────────────
+/** Discriminated result of TOTP verification. */
+export type TotpVerifyResult = TokenResponse | ForcePasswordChangeResponse;
 
-export interface LoginRequest {
-  email?: string;
-  phone?: string;
-  password: string;
+export function isForcePasswordChange(
+  result: TotpVerifyResult,
+): result is ForcePasswordChangeResponse {
+  return (result as ForcePasswordChangeResponse).forcePasswordChange === true;
 }
-
-export interface AuthTokens {
-  accessToken: string;
-  refreshToken: string;
-}
-
-export type LoginResponse = ApiResponse<AuthTokens>;
-
-// ── API methods ──────────────────────────────────────────────────────────────
 
 export const authApi = {
-  /**
-   * Admin login — email/phone + password
-   * POST /user/signin
-   *
-   * On success the response body contains accessToken + refreshToken.
-   * Store the tokens client-side and pass accessToken as a Bearer header.
-   */
-  login: async (data: LoginRequest): Promise<LoginResponse> => {
-    const response = await apiClient.post<LoginResponse>(
-      "/user/signin",
-      data,
-    );
-    return response.data;
+  /** Step 1 — password auth. Returns a 5-minute session token. */
+  login: async (data: LoginRequest): Promise<LoginResult> => {
+    const res = await apiClient.post<LoginResult>("/auth/login", data);
+    return res.data;
   },
 
-  /**
-   * Refresh access token
-   * POST /user/refresh
-   *
-   * Exchange a valid refreshToken for a new accessToken + refreshToken pair.
-   * The old refresh token is invalidated immediately.
-   */
-  refreshSession: async (refreshToken: string): Promise<LoginResponse> => {
-    const response = await apiClient.post<LoginResponse>(
-      "/user/refresh",
-      { refreshToken },
-    );
-    return response.data;
+  /** Step 2 — TOTP verification. Returns a JWT pair or a force-password-change flag. */
+  verifyTotp: async (data: TotpVerifyRequest): Promise<TotpVerifyResult> => {
+    const res = await apiClient.post<TotpVerifyResult>("/auth/totp/verify", data);
+    return res.data;
   },
 
-  /**
-   * Admin logout — clears client-side state.
-   * The openapi.yaml doesn't define a dedicated logout endpoint,
-   * so we just discard tokens on the client side.
-   */
-  logout: async () => {
-    // No server-side logout endpoint in the spec — client-side cleanup only
-    return Promise.resolve();
+  /** Generate a TOTP secret + otpauth URL for the authenticated admin. */
+  setupTotp: async (): Promise<TotpSetupResult> => {
+    const res = await apiClient.post<TotpSetupResult>("/auth/totp/setup");
+    return res.data;
+  },
+
+  /** Confirm TOTP enrollment with a code generated from the setup secret. */
+  confirmTotp: async (data: TotpConfirmRequest): Promise<void> => {
+    await apiClient.post("/auth/totp/confirm", data);
+  },
+
+  /** Change the authenticated admin's password (clears forcePasswordChange). */
+  changePassword: async (data: ChangePasswordRequest): Promise<void> => {
+    await apiClient.post("/auth/change-password", data);
+  },
+
+  /** Revoke the current session and blocklist the JWT. */
+  logout: async (): Promise<void> => {
+    await apiClient.post("/auth/logout");
   },
 };

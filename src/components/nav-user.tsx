@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/sidebar"
 import { EllipsisVerticalIcon, CircleUserRoundIcon, CreditCardIcon, BellIcon, LogOutIcon } from "lucide-react"
 import { useAuthStore } from "@/stores/auth-store"
+import { authApi } from "@/api/auth"
 
 export function NavUser({
   user,
@@ -95,9 +96,13 @@ export function NavUser({
               </DropdownMenuItem>
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => {
+            <DropdownMenuItem onClick={async () => {
+              try {
+                await authApi.logout()
+              } catch {
+                // Revoke locally even if the server call fails.
+              }
               useAuthStore.getState().clearSession()
-              document.cookie = "admin_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT"
               window.location.href = "/login"
             }}>
               <LogOutIcon />
