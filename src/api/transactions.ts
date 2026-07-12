@@ -1,90 +1,76 @@
 /**
- * Transactions API module
- * PRD §6.5 — Transaction Oversight & Risk Management
+ * Transactions API — unified ledger, CSV export, and VAS reverse/retry.
+ * See openapi-admin.yaml › Transactions.
  */
 
 import { apiClient } from "./client";
+import { cleanParams, type Paginated } from "./types";
 import type {
-  PaginatedResponse,
-  PaginationParams,
+  TransactionResponse,
+  PaginatedTransactions,
+  VasActionRequest,
   TransactionType,
-  RiskLevel,
-} from "./types";
+  TransactionStatus,
+} from "./schema";
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface Transaction {
-  id: string;
-  type: TransactionType;
-  userId: string;
-  userName: string;
-  asset: string;
-  amount: number;
-  usdValue: number;
-  fee: number;
-  status: string;
-  riskLevel: RiskLevel;
-  riskScore: number;
-  riskFlags: string[];
-  fromAddress?: string;
-  toAddress?: string;
-  network?: string;
-  txHash?: string;
-  createdAt: string;
-  completedAt?: string;
-}
-
-export interface TransactionDetail extends Transaction {
-  user: {
-    id: string;
-    fullName: string;
-    email: string;
-    accountAge: number; // days
-    kycStatus: string;
-  };
-  relatedTransactions: Transaction[];
-}
-
-export type TransactionListParams = PaginationParams & {
+export interface TransactionListParams {
   type?: TransactionType;
-  riskLevel?: RiskLevel;
+  status?: TransactionStatus;
   userId?: string;
-  startDate?: string;
-  endDate?: string;
-  minAmount?: number;
-  maxAmount?: number;
-};
+  dateFrom?: string;
+  dateTo?: string;
+  amountMin?: number;
+  amountMax?: number;
+  cursor?: string;
+  limit?: number;
+}
 
-// ── API methods ──────────────────────────────────────────────────────────────
+/** Filters shared between list and export (export takes no cursor/limit). */
+export type TransactionFilters = Omit<TransactionListParams, "cursor" | "limit">;
 
 export const transactionsApi = {
-  /** Fetch paginated transaction ledger */
-  getTransactions: async (
-    params?: TransactionListParams
-  ): Promise<PaginatedResponse<Transaction>> => {
-    const response = await apiClient.get<PaginatedResponse<Transaction>>(
-      "/transactions",
-      { params }
-    );
-    return response.data;
-  },
-
-  /** Fetch single transaction with related data */
-  getTransaction: async (id: string): Promise<TransactionDetail> => {
-    const response = await apiClient.get<TransactionDetail>(
-      `/transactions/${id}`
-    );
-    return response.data;
-  },
-
-  /** Manually flag a transaction for review */
-  flagTransaction: async (
-    id: string,
-    reason: string
-  ): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(`/transactions/${id}/flag`, {
-      reason,
+  /** GET /transactions — cursor-paginated ledger with filters. */
+  list: async (params: TransactionListParams = {}): Promise<Paginated<TransactionResponse>> => {
+    const res = await apiClient.get<PaginatedTransactions>("/transactions", {
+      params: cleanParams(params),
     });
-    return response.data;
+    return res.data as Paginated<TransactionResponse>;
+  },
+
+  /** GET /transactions/{id} — single transaction detail. */
+  get: async (id: string): Promise<TransactionResponse> => {
+    const res = await apiClient.get<TransactionResponse>(`/transactions/${id}`);
+    return res.data;
+  },
+
+  /** POST /transactions/{id}/reverse — reverse a confirmed/successful VAS tx. */
+  reverse: async (id: string, body?: VasActionRequest): Promise<TransactionResponse> => {
+    const res = await apiClient.post<TransactionResponse>(`/transactions/${id}/reverse`, body ?? {});
+    return res.data;
+  },
+
+  /** POST /transactions/{id}/retry — retry a failed/cancelled VAS tx. */
+  retry: async (id: string, body?: VasActionRequest): Promise<TransactionResponse> => {
+    const res = await apiClient.post<TransactionResponse>(`/transactions/${id}/retry`, body ?? {});
+    return res.data;
+  },
+
+  /**
+   * GET /transactions/export — stream matching transactions as CSV and trigger
+   * a browser download. Uses the authenticated client (Bearer token) and a blob.
+   */
+  exportCsv: async (filters: TransactionFilters = {}): Promise<void> => {
+    const res = await apiClient.get("/transactions/export", {
+      params: cleanParams(filters),
+      responseType: "blob",
+    });
+    const url = URL.createObjectURL(res.data as Blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "transactions.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   },
 };

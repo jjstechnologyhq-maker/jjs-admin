@@ -3,7 +3,6 @@ import { Inter, Roboto_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/providers/theme-provider";
 import { QueryProvider } from "@/lib/query/provider";
-import { MSWProvider } from "@/components/providers/msw-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const inter = Inter({
@@ -36,11 +35,9 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <ThemeProvider>
           <QueryProvider>
-            <MSWProvider>
-              <TooltipProvider delay={200}>
-                {children}
-              </TooltipProvider>
-            </MSWProvider>
+            <TooltipProvider delay={200}>
+              {children}
+            </TooltipProvider>
           </QueryProvider>
         </ThemeProvider>
       </body>

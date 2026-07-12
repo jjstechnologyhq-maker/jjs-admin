@@ -1,161 +1,68 @@
 /**
- * Admin API module — aligned with openapi.yaml
- * GET /user/admin/stats — platform-wide statistics
- *
- * Admin management endpoints (invite, suspend, etc.) are NOT in the
- * current openapi.yaml, so those methods are kept as provisional stubs
- * that will be updated when the spec evolves.
+ * Admins API — account management (mostly SUPER_ADMIN).
+ * See openapi-admin.yaml › Admins.
  */
 
 import { apiClient } from "./client";
+import { cleanParams, type Paginated } from "./types";
 import type {
-  PaginatedResponse,
-  PaginationParams,
-  ApiResponse,
-  AdminStats,
-  InvitationStatus,
-} from "./types";
-import type { Role } from "@/lib/auth/types";
+  AdminProfile,
+  AdminDetail,
+  ListAdminsResult,
+  InviteAdminRequest,
+  InviteAdminResult,
+  UpdateAdminRequest,
+  MfaResetRequest,
+  AdminStatus,
+} from "./schema";
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface AdminUser {
-  id: string;
-  email: string;
-  fullName: string;
-  permissions: Role[];
-  status: InvitationStatus;
-  mfaEnabled: boolean;
-  createdAt: string;
-  lastActive: string;
-  loginCount: number;
+export interface AdminListParams {
+  status?: AdminStatus;
+  cursor?: string;
+  limit?: number;
 }
-
-export interface AdminDetail extends AdminUser {
-  loginHistory: {
-    timestamp: string;
-    ip: string;
-    userAgent: string;
-    success: boolean;
-  }[];
-  actionSummary: {
-    totalActions: number;
-    lastAction: string;
-    lastActionTimestamp: string;
-  };
-}
-
-export interface AuditLog {
-  id: string;
-  timestamp: string;
-  adminId: string;
-  adminEmail: string;
-  action: string;
-  resourceType: string;
-  resourceId?: string;
-  ipAddress: string;
-  details?: Record<string, any>;
-}
-
-export interface AdminInviteRequest {
-  email: string;
-  permissions: Role[];
-  fullName: string;
-}
-
-export type AdminListParams = PaginationParams & {
-  status?: InvitationStatus;
-  role?: Role;
-};
-
-// ── API methods ──────────────────────────────────────────────────────────────
 
 export const adminApi = {
-  /**
-   * Get platform-wide statistics (admin only)
-   * GET /user/admin/stats
-   * This IS in the openapi.yaml spec.
-   */
-  getStats: async (): Promise<ApiResponse<AdminStats>> => {
-    const response = await apiClient.get<ApiResponse<AdminStats>>(
-      "/user/admin/stats",
-    );
-    return response.data;
-  },
-
-  // ── Below are provisional endpoints NOT yet in openapi.yaml ──────────────
-  // They use best-guess paths and will be updated as the spec evolves.
-
-  /** Fetch paginated system audit logs */
-  getAuditLogs: async (
-    params?: PaginationParams,
-  ): Promise<PaginatedResponse<AuditLog>> => {
-    const response = await apiClient.get<PaginatedResponse<AuditLog>>(
-      "/audit-logs",
-      { params },
-    );
-    return response.data;
-  },
-
-  /** Fetch all admin users with filters */
-  getAdmins: async (
-    params?: AdminListParams,
-  ): Promise<PaginatedResponse<AdminUser>> => {
-    const response = await apiClient.get<PaginatedResponse<AdminUser>>(
-      "/admins",
-      { params },
-    );
-    return response.data;
-  },
-
-  /** Get detailed admin profile */
-  getAdmin: async (id: string): Promise<AdminDetail> => {
-    const response = await apiClient.get<AdminDetail>(`/admins/${id}`);
-    return response.data;
-  },
-
-  /** Invite a new admin by email and assign role */
-  invite: async (
-    data: AdminInviteRequest,
-  ): Promise<{ success: boolean; adminId: string }> => {
-    const response = await apiClient.post("/admins/invite", data);
-    return response.data;
-  },
-
-  /** Update an admin's permissions */
-  updatePermissions: async (
-    id: string,
-    permissions: Role[],
-  ): Promise<{ success: boolean }> => {
-    const response = await apiClient.patch(`/admins/${id}/permissions`, {
-      permissions,
+  /** GET /admins — cursor-paginated admin list (non-standard envelope, normalised here). */
+  list: async (params: AdminListParams = {}): Promise<Paginated<AdminProfile>> => {
+    const res = await apiClient.get<ListAdminsResult>("/admins", {
+      params: cleanParams(params),
     });
-    return response.data;
+    const { data, nextCursor, hasNextPage } = res.data;
+    return { data, meta: { nextCursor, hasMore: hasNextPage } };
   },
 
-  /** Suspend an admin (revokes sessions instantly) */
-  suspend: async (id: string): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(`/admins/${id}/suspend`);
-    return response.data;
+  /** GET /admins/me — the current admin's profile. */
+  me: async (): Promise<AdminProfile> => {
+    const res = await apiClient.get<AdminProfile>("/admins/me");
+    return res.data;
   },
 
-  /** Deactivate/delete an admin (permanent) */
-  deactivate: async (id: string): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(`/admins/${id}/deactivate`);
-    return response.data;
+  /** GET /admins/{adminId} — full detail incl. recent activity + action summary. */
+  get: async (adminId: string): Promise<AdminDetail> => {
+    const res = await apiClient.get<AdminDetail>(`/admins/${adminId}`);
+    return res.data;
   },
 
-  /** Force MFA reset for an admin */
-  resetMfa: async (id: string): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(`/admins/${id}/reset-mfa`);
-    return response.data;
+  /** POST /admins — invite a new admin (PENDING + invite email). */
+  invite: async (body: InviteAdminRequest): Promise<InviteAdminResult> => {
+    const res = await apiClient.post<InviteAdminResult>("/admins", body);
+    return res.data;
   },
 
-  /** Force password change on next login */
-  forcePasswordChange: async (id: string): Promise<{ success: boolean }> => {
-    const response = await apiClient.post(
-      `/admins/${id}/force-password-change`,
-    );
-    return response.data;
+  /** PATCH /admins/{adminId} — update status/role/flags. */
+  update: async (adminId: string, body: UpdateAdminRequest): Promise<AdminProfile> => {
+    const res = await apiClient.patch<AdminProfile>(`/admins/${adminId}`, body);
+    return res.data;
+  },
+
+  /** POST /admins/{adminId}/mfa/reset — force TOTP re-enrollment. */
+  resetMfa: async (adminId: string, body: MfaResetRequest): Promise<void> => {
+    await apiClient.post(`/admins/${adminId}/mfa/reset`, body);
+  },
+
+  /** POST /admins/{adminId}/invite/resend — resend invite to a PENDING admin. */
+  resendInvite: async (adminId: string): Promise<void> => {
+    await apiClient.post(`/admins/${adminId}/invite/resend`);
   },
 };

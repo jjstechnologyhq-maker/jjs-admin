@@ -1,0 +1,5113 @@
+openapi: 3.1.0
+info:
+  title: JJS Admin Service API
+  version: 1.0.0
+  description: |
+    ## Authentication
+
+    Login is a **two-step flow**:
+
+    1. **POST /auth/login** — submit email + password. Returns `{ sessionToken, mfaRequired: true }`.
+       The session token is valid for **5 minutes**. Complete step 2 within this window.
+    2. **POST /auth/totp/verify** — submit `sessionToken` + 6-digit TOTP code. Returns either:
+       - `{ accessToken, refreshToken, expiresIn, admin }` — normal login
+       - `{ forcePasswordChange: true }` — admin must call POST /auth/change-password before proceeding
+
+    The `accessToken` is a JWT valid for **15 minutes** (`expiresIn: 900`). Attach it as
+    `Authorization: Bearer {accessToken}` on every protected request.
+
+    **Proactive refresh**: refresh the access token before it expires using POST /auth/refresh.
+    The refresh token is valid for **7 days** and **rotates on every use** — the old token is
+    immediately invalidated. If a reused refresh token is detected, all sessions for that admin
+    are wiped and a full re-login is required.
+
+    **Inactivity timeout**: the server-side inactivity window is 15 minutes. After 15 minutes of
+    no authenticated requests the session is invalidated and the next request returns 401
+    `SESSION_EXPIRED`. The frontend should reset this timer on every successful response.
+
+    **Brute-force lockout**: 5 consecutive failed login attempts within 10 minutes triggers a
+    10-minute lockout. Returns 429 `TOO_MANY_ATTEMPTS`.
+
+    ## Pagination
+
+    All list endpoints use **cursor-based pagination** — not offset/page numbers.
+
+    - Pass `cursor` and `limit` as query parameters. Omit `cursor` for the first page.
+    - The response `meta` object contains:
+      - `nextCursor`: opaque base64 string. Pass as `cursor` on the next request. `null` means no more pages.
+      - `hasMore`: `true` when at least one more page exists.
+      - `total`: total count matching the current filters (expensive — use for display only).
+    - The cursor is **opaque** — never decode, modify, or construct it.
+
+    ## Error Shape
+
+    Every error response has this envelope:
+    ```json
+    { "code": 401, "message": "Human-readable description", "details": { "errorCode": "MACHINE_CODE" } }
+    ```
+    `details` is `null` for unhandled 500 errors. Use `details.errorCode` for programmatic handling.
+
+    ## Monetary Values
+
+    All decimal/monetary fields (amount, balance, fee, spread, threshold, etc.) are serialised as
+    **strings**, never numbers. Parse with `parseFloat()` or a BigDecimal library on the client to
+    avoid floating-point precision loss.
+
+    ## Date/Time
+
+    All datetime fields are ISO 8601 strings in **UTC** (e.g. `"2026-05-28T13:00:00.000Z"`).
+
+    ## RBAC Summary
+
+    | Role | Modules |
+    |---|---|
+    | SUPER_ADMIN | All modules |
+    | FINANCE_MANAGER | Finance, Pricing, VAS, Transactions, Analytics |
+    | COMPLIANCE_OFFICER | Users, KYC, Transactions, Risk, Analytics |
+    | CUSTOMER_SUPPORT | Support, Analytics |
+
+servers:
+  - url: http://localhost:8000/admin
+    description: Local development (Kong gateway — port 8000)
+  - url: https://api.jjscurrency.exchange/admin
+    description: Production
+
+tags:
+  - name: Auth
+    description: |
+      Two-step login (password → TOTP), token refresh, logout, TOTP enrollment, password change.
+      All endpoints except login, totp/verify, and refresh require a valid Bearer token.
+  - name: Admins
+    description: |
+      Admin account management. Most endpoints require **SUPER_ADMIN** role.
+      `GET /admins/me` and `POST /admins/activate` are accessible by all authenticated admins.
+  - name: Users
+    description: |
+      Read-only user lookup and status management. Status changes require **SUPER_ADMIN** or
+      **COMPLIANCE_OFFICER**. All other endpoints require any valid role.
+  - name: KYC
+    description: |
+      KYC submission review queue. Requires **SUPER_ADMIN** or **COMPLIANCE_OFFICER**.
+      Document URLs (idDocumentUrl, selfieUrl) are pre-signed S3 URLs with a **60-second TTL**.
+      Do not cache them — fetch fresh on every render.
+  - name: Transactions
+    description: |
+      Unified transaction ledger. Requires **SUPER_ADMIN**, **FINANCE_MANAGER**, or
+      **COMPLIANCE_OFFICER**. Includes CSV export and VAS reverse/retry actions.
+  - name: Finance
+    description: |
+      Wallet balance monitoring, manual adjustments (Maker-Checker), and withdrawal queue.
+      Requires **SUPER_ADMIN** or **FINANCE_MANAGER**.
+      Adjustments above `APPROVAL_THRESHOLD_NGN` (default 1,000,000 NGN) require a second admin
+      to approve via POST /finance/adjustments/{id}/approve.
+  - name: Pricing
+    description: |
+      Asset pair spreads, fee rules, and asset enable/disable. Requires **SUPER_ADMIN** or
+      **FINANCE_MANAGER**. Spread changes propagate to wallet-service via Redis pub/sub within
+      5 seconds. Asset disable takes effect immediately.
+  - name: Risk
+    description: |
+      Automated risk rule engine and manual transaction flagging. Requires **SUPER_ADMIN** or
+      **COMPLIANCE_OFFICER**. New risk rules activate within 10 seconds (Redis cache invalidation).
+      Self-approval is blocked — the admin who created a flag cannot approve it.
+  - name: VAS
+    description: |
+      Value-Added Services provider and product management. Requires **SUPER_ADMIN** or
+      **FINANCE_MANAGER**. Provider health status (ONLINE/DEGRADED/OFFLINE) is updated by a
+      background worker every 30 seconds — it reflects the last ping result, not a live check.
+  - name: Support
+    description: |
+      Support ticket management, push notifications, in-app banners, and email templates.
+      Requires **SUPER_ADMIN** or **CUSTOMER_SUPPORT** (banners also accessible by
+      FINANCE_MANAGER and COMPLIANCE_OFFICER for read access).
+  - name: Analytics
+    description: |
+      Pre-computed analytics metrics and PDF report generation. Accessible by all authenticated
+      roles. Metrics are aggregated nightly at 02:00 UTC — data may be up to 24 hours old.
+      Audit log (GET /analytics/audit-log) requires **SUPER_ADMIN** only.
+
+security:
+  - BearerAuth: []
+
+paths:
+
+  # ── Auth ────────────────────────────────────────────────────────────────────
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Step 1 — password authentication
+      description: |
+        Validates email and password. On success returns a `sessionToken` valid for **5 minutes**.
+        Pass this token to POST /auth/totp/verify to complete login.
+        Does not return a JWT — the session token is not a Bearer token.
+        Brute-force protection: 5 failed attempts within 10 minutes triggers 429.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: alice@example.com
+              password: "SuperSecret123"
+      responses:
+        '200':
+          description: Password accepted — proceed to TOTP verification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResult'
+              example:
+                sessionToken: "550e8400-e29b-41d4-a716-446655440000"
+                mfaRequired: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/InvalidCredentials'
+        '403':
+          $ref: '#/components/responses/AccountSuspended'
+        '429':
+          $ref: '#/components/responses/TooManyAttempts'
+
+  /auth/totp/verify:
+    post:
+      tags: [Auth]
+      summary: Step 2 — TOTP verification, issues JWT
+      description: |
+        Validates the 6-digit TOTP code against the session created in step 1.
+        The session token expires after **5 minutes** — if expired the response is 401 SESSION_EXPIRED.
+        TOTP window accepts ±30 seconds of clock drift (window=1).
+
+        **Two possible success responses:**
+        - If `forcePasswordChange` is true on the account: returns `{ forcePasswordChange: true }`.
+          The frontend must redirect to a change-password screen. No JWT is issued.
+        - Otherwise: returns `{ accessToken, refreshToken, expiresIn, admin }`.
+          Store tokens securely and schedule a refresh before `expiresIn` seconds elapse.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpVerifyRequest'
+            example:
+              sessionToken: "550e8400-e29b-41d4-a716-446655440000"
+              totpToken: "123456"
+      responses:
+        '200':
+          description: TOTP valid — JWT issued or force-password-change flag returned
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TokenResponse'
+                  - $ref: '#/components/schemas/ForcePasswordChangeResponse'
+              examples:
+                jwt_issued:
+                  summary: Normal login — JWT issued
+                  value:
+                    accessToken: "eyJhbGciOiJSUzI1NiJ9..."
+                    refreshToken: "a1b2c3d4-uuid.rawsecrethere"
+                    expiresIn: 900
+                    admin:
+                      id: "admin-uuid-here"
+                      email: alice@example.com
+                      role: SUPER_ADMIN
+                      status: ACTIVE
+                      mfaEnrolled: true
+                      forcePasswordChange: false
+                      lastLoginAt: "2026-05-28T12:00:00.000Z"
+                force_password_change:
+                  summary: Admin must change password before proceeding
+                  value:
+                    forcePasswordChange: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Invalid TOTP or expired session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_totp:
+                  value: { code: 401, message: "Invalid or expired TOTP code", details: { errorCode: INVALID_TOTP } }
+                session_expired:
+                  value: { code: 401, message: "Session has expired or is invalid", details: { errorCode: SESSION_EXPIRED } }
+        '403':
+          description: MFA not enrolled — admin must complete TOTP setup first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 403
+                message: "MFA has not been enrolled; complete /auth/totp/setup first"
+                details: { errorCode: MFA_NOT_ENROLLED }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh token, issue new JWT pair
+      description: |
+        Exchanges a valid refresh token for a new access + refresh token pair.
+        The old refresh token is **immediately invalidated** — do not reuse it.
+        If a reused refresh token is detected, **all sessions for that admin are wiped**.
+        Refresh tokens are valid for 7 days.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+            example:
+              refreshToken: "a1b2c3d4-uuid.rawsecrethere"
+      responses:
+        '200':
+          description: New token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Invalid, expired, or reused refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid:
+                  value: { code: 401, message: "Refresh token is invalid or has expired", details: { errorCode: REFRESH_TOKEN_INVALID } }
+                expired:
+                  value: { code: 401, message: "Refresh token has expired", details: { errorCode: REFRESH_TOKEN_EXPIRED } }
+                reused:
+                  value: { code: 401, message: "Refresh token has already been used — all sessions revoked", details: { errorCode: REFRESH_TOKEN_REUSED } }
+
+  /auth/totp/setup:
+    post:
+      tags: [Auth]
+      summary: Generate TOTP secret and QR URL
+      description: |
+        Generates a new TOTP secret for the authenticated admin.
+        Returns a base32 secret and an `otpauthUrl` — render the URL as a QR code so the admin
+        can scan it with an authenticator app.
+        After scanning, the admin must call POST /auth/totp/confirm with a valid code to activate MFA.
+        Returns 409 if MFA is already enrolled.
+      responses:
+        '200':
+          description: TOTP secret generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpSetupResult'
+              example:
+                otpauthUrl: "otpauth://totp/Admin:alice%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Admin"
+                secret: "JBSWY3DPEHPK3PXP"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: MFA is already enrolled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: "MFA is already enrolled for this account"
+                details: { errorCode: MFA_ALREADY_ENROLLED }
+
+  /auth/totp/confirm:
+    post:
+      tags: [Auth]
+      summary: Confirm TOTP enrollment with a valid code
+      description: |
+        Verifies a TOTP code generated from the secret returned by POST /auth/totp/setup.
+        On success sets `mfaEnrolled = true` on the admin account.
+        Must be called after setup and before the first login that requires TOTP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpConfirmRequest'
+            example:
+              totpToken: "654321"
+      responses:
+        '204':
+          description: TOTP enrollment confirmed
+        '401':
+          description: Invalid TOTP code or session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 401
+                message: "Invalid or expired TOTP code"
+                details: { errorCode: INVALID_TOTP }
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change authenticated admin's password
+      description: |
+        Changes the password for the currently authenticated admin.
+        `newPassword` must be at least 12 characters and must differ from the current password.
+        After a successful change the `forcePasswordChange` flag is cleared, allowing normal login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+            example:
+              currentPassword: "OldPassword123"
+              newPassword: "NewStrongerPass456!"
+      responses:
+        '204':
+          description: Password changed successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Current password is incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 401
+                message: "Current password is incorrect"
+                details: { errorCode: INVALID_CURRENT_PASSWORD }
+        '422':
+          description: New password is the same as the current password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 422
+                message: "New password must differ from the current password"
+                details: { errorCode: PASSWORD_SAME_AS_CURRENT }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke current session and blocklist JWT
+      description: |
+        Adds the current JWT to the blocklist (until its natural expiry), deletes all refresh
+        sessions for this admin, and clears the inactivity timer.
+        After logout any request with the same JWT returns 401 TOKEN_REVOKED.
+      responses:
+        '204':
+          description: Logged out successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Admins ──────────────────────────────────────────────────────────────────
+
+  /admins:
+    get:
+      tags: [Admins]
+      summary: List admin accounts (SUPER_ADMIN)
+      description: Cursor-paginated list of all admin accounts. Filter by status.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AdminStatus'
+          description: Filter by account status. Omit to return all statuses.
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+      responses:
+        '200':
+          description: Paginated admin list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListAdminsResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Admins]
+      summary: Invite a new admin (SUPER_ADMIN)
+      description: |
+        Creates an admin account in PENDING status and sends an invite email containing a
+        one-time activation token. Returns the new admin's ID and email.
+        Returns 409 if an invitation is already pending for this email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteAdminRequest'
+            example:
+              email: bob@example.com
+              role: FINANCE_MANAGER
+      responses:
+        '201':
+          description: Invitation sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InviteAdminResult'
+              example:
+                adminId: "admin-uuid-here"
+                email: bob@example.com
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Invite already pending for this email
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: "An invitation is already pending for this email"
+                details: { errorCode: INVITE_ALREADY_PENDING }
+
+  /admins/activate:
+    post:
+      tags: [Admins]
+      summary: Activate account from email invite token (public)
+      description: |
+        Accepts the one-time token from the invite email and the admin's chosen password.
+        On success activates the account and returns `{ otpauthUrl, secret }` so the admin
+        can immediately set up their TOTP authenticator. They must call POST /auth/totp/confirm
+        to complete MFA enrollment before they can log in.
+        Returns 404 if token is unknown, 409 if already used, 422 if expired.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActivateAdminRequest'
+            example:
+              token: "one-time-invite-token-from-email"
+              password: "MySecurePassword1"
+      responses:
+        '200':
+          description: Account activated — TOTP setup data returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpSetupResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Invite token not found"
+                details: { errorCode: INVITE_NOT_FOUND }
+        '409':
+          description: Invite token already used
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: "Invite token has already been used"
+                details: { errorCode: INVITE_ALREADY_USED }
+        '422':
+          description: Invite token expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 422
+                message: "Invite token has expired"
+                details: { errorCode: INVITE_EXPIRED }
+
+  /admins/me:
+    get:
+      tags: [Admins]
+      summary: Get current admin's profile
+      description: Returns the profile of the admin identified by the Bearer token.
+      responses:
+        '200':
+          description: Current admin profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /admins/{adminId}:
+    get:
+      tags: [Admins]
+      summary: Get admin by ID (SUPER_ADMIN)
+      description: Returns full admin detail including recent audit activity and action summary.
+      parameters:
+        - $ref: '#/components/parameters/adminId'
+      responses:
+        '200':
+          description: Admin detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminNotFound'
+
+    patch:
+      tags: [Admins]
+      summary: Update admin status, role, or flags (SUPER_ADMIN)
+      description: |
+        Partially updates an admin account. All fields are optional.
+        - **role change**: if the account has active sessions, pass `confirmRoleChange: true` to
+          acknowledge that existing JWTs will retain the old role until they expire.
+          Without this confirmation the endpoint returns 409 ROLE_CHANGE_CONFIRMATION_REQUIRED.
+        - **status**: setting SUSPENDED or DEACTIVATED blocks future logins; existing JWTs remain
+          valid until expiry.
+        - An admin cannot update their own account (403 SELF_ACTION_FORBIDDEN).
+        - The last SUPER_ADMIN cannot be suspended or deactivated (409 LAST_SUPER_ADMIN).
+      parameters:
+        - $ref: '#/components/parameters/adminId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAdminRequest'
+            examples:
+              suspend:
+                value: { status: SUSPENDED }
+              role_change:
+                value: { role: COMPLIANCE_OFFICER, confirmRoleChange: true }
+              force_password_change:
+                value: { forcePasswordChange: true }
+      responses:
+        '200':
+          description: Updated admin profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminProfile'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — either wrong role or self-action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                wrong_role:
+                  value: { code: 403, message: "Access denied", details: { errorCode: FORBIDDEN } }
+                self_action:
+                  value: { code: 403, message: "Cannot modify your own account", details: { errorCode: SELF_ACTION_FORBIDDEN } }
+        '404':
+          $ref: '#/components/responses/AdminNotFound'
+        '409':
+          description: Last SUPER_ADMIN or role change requires confirmation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                last_super_admin:
+                  value: { code: 409, message: "Cannot deactivate the last SUPER_ADMIN", details: { errorCode: LAST_SUPER_ADMIN } }
+                role_confirmation:
+                  value: { code: 409, message: "Role change requires confirmRoleChange: true", details: { errorCode: ROLE_CHANGE_CONFIRMATION_REQUIRED } }
+
+  /admins/{adminId}/mfa/reset:
+    post:
+      tags: [Admins]
+      summary: Reset MFA for an admin (SUPER_ADMIN)
+      description: |
+        Clears `mfaEnrolled` and `mfaSecret` for the target admin, forcing them to re-enroll
+        TOTP on next login. Requires an `offlineVerificationNote` documenting how identity was
+        verified out-of-band (e.g. video call).
+      parameters:
+        - $ref: '#/components/parameters/adminId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaResetRequest'
+            example:
+              offlineVerificationNote: "Identity verified via Zoom call on 2026-05-28"
+      responses:
+        '204':
+          description: MFA reset successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminNotFound'
+
+  /admins/{adminId}/invite/resend:
+    post:
+      tags: [Admins]
+      summary: Resend invite email (SUPER_ADMIN)
+      description: |
+        Generates a new invite token and resends the invite email to a PENDING admin.
+        The previous token is invalidated. Returns 422 if the account is not in PENDING status.
+      parameters:
+        - $ref: '#/components/parameters/adminId'
+      responses:
+        '204':
+          description: Invite resent
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AdminNotFound'
+        '422':
+          description: Account is not in PENDING status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 422
+                message: "Account is not awaiting activation"
+                details: { errorCode: INVITE_NOT_PENDING }
+
+  # ── Users ───────────────────────────────────────────────────────────────────
+
+  /users:
+    get:
+      tags: [Users]
+      summary: Search and list users
+      description: |
+        Cursor-paginated user list with optional filters. Supports full-text search via `q`
+        and individual field filters. Multiple filters are ANDed together.
+        Default page size: 50, maximum: 200.
+      parameters:
+        - name: q
+          in: query
+          description: Full-text search across name, email, and phone
+          schema:
+            type: string
+          example: "alice"
+        - name: name
+          in: query
+          schema:
+            type: string
+        - name: email
+          in: query
+          schema:
+            type: string
+          example: "alice@example.com"
+        - name: phone
+          in: query
+          schema:
+            type: string
+        - name: walletAddress
+          in: query
+          schema:
+            type: string
+        - name: kyc_status
+          in: query
+          schema:
+            $ref: '#/components/schemas/KycStatus'
+        - name: account_status
+          in: query
+          schema:
+            $ref: '#/components/schemas/UserAccountStatus'
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Paginated user list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedUsers'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/{userId}:
+    get:
+      tags: [Users]
+      summary: Get user detail
+      description: |
+        Returns full user profile including fiat balances, crypto balances, linked devices,
+        and internal admin notes. Data is fetched live from the user platform service.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      responses:
+        '200':
+          description: User detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+
+  /users/{userId}/status:
+    patch:
+      tags: [Users]
+      summary: Update user account status (SUPER_ADMIN, COMPLIANCE_OFFICER)
+      description: |
+        Updates a user's account status. Valid values: ACTIVE, FROZEN, SHADOW_BANNED.
+        A reason is required and is stored in the audit log.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserStatusRequest'
+            example:
+              status: FROZEN
+              reason: "Suspected fraudulent activity — under investigation"
+      responses:
+        '200':
+          description: Updated user summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSummary'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+
+  /users/{userId}/notes:
+    post:
+      tags: [Users]
+      summary: Create internal admin note on a user
+      description: |
+        Adds a private admin note to a user's record. Notes are visible to all admins
+        but never to the user. Maximum 2000 characters.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNoteRequest'
+            example:
+              content: "User contacted support regarding delayed withdrawal. Issue resolved on 2026-05-28."
+      responses:
+        '201':
+          description: Note created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserNoteView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+
+    get:
+      tags: [Users]
+      summary: List internal notes for a user
+      description: Cursor-paginated list of admin notes on the given user, newest first.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+      responses:
+        '200':
+          description: Paginated notes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedNotes'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/UserNotFound'
+
+  /users/{userId}/notes/{noteId}:
+    delete:
+      tags: [Users]
+      summary: Soft-delete an admin note
+      description: |
+        Soft-deletes a note (sets `deletedAt`). The note remains in the audit trail but is
+        hidden from normal views. An admin can only delete their own notes unless they are
+        SUPER_ADMIN.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+        - name: noteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Note deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Note not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Note not found"
+                details: { errorCode: NOTE_NOT_FOUND }
+
+  # ── KYC ─────────────────────────────────────────────────────────────────────
+
+  /kyc/queue:
+    get:
+      tags: [KYC]
+      summary: List KYC review queue (SUPER_ADMIN, COMPLIANCE_OFFICER)
+      description: |
+        Cursor-paginated list of KYC submissions for review. Default filter returns PENDING
+        and INFO_REQUIRED submissions.
+
+        **Important**: `idDocumentUrl` and `selfieUrl` are pre-signed S3 URLs with a
+        **60-second TTL**. Do not cache them. Always fetch fresh before rendering.
+
+        `NOT_SUBMITTED` is a UI-only sentinel — passing it alone returns an empty result set.
+      parameters:
+        - name: status
+          in: query
+          description: One or more statuses to include. Default is PENDING and INFO_REQUIRED.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/KycQueueStatusFilter'
+          style: form
+          explode: true
+          example: [PENDING, INFO_REQUIRED]
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Paginated KYC queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedKycQueue'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /kyc/{userId}:
+    get:
+      tags: [KYC]
+      summary: Get KYC detail for a user (SUPER_ADMIN, COMPLIANCE_OFFICER)
+      description: |
+        Returns full KYC submission detail plus a summary of the user from the user platform.
+        `user` may be null if the user platform is temporarily unavailable.
+        Pre-signed document URLs are generated fresh on every request (60-second TTL).
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      responses:
+        '200':
+          description: KYC detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No KYC submission found for this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "KYC submission not found"
+                details: { errorCode: KYC_NOT_FOUND }
+
+    patch:
+      tags: [KYC]
+      summary: Update KYC submission status (SUPER_ADMIN, COMPLIANCE_OFFICER)
+      description: |
+        Updates the status of a KYC submission. Reviewer ID is derived from the JWT — never
+        send it in the body.
+
+        **Conditional validation:**
+        - `rejectionReason` is **required** when `status = REJECTED`. Omitting it returns 422.
+        - `rejectionReason` must be **absent** when `status != REJECTED`. Including it returns 422.
+
+        Valid `status` values: APPROVED, REJECTED, INFO_REQUIRED.
+
+        On APPROVED: triggers async status sync to the user platform via RabbitMQ.
+        After any status change: enqueues a KYC status-changed notification to the user.
+      parameters:
+        - $ref: '#/components/parameters/userId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateKycStatusRequest'
+            examples:
+              approve:
+                value: { status: APPROVED }
+              reject:
+                value: { status: REJECTED, rejectionReason: BLURRY_DOCUMENT }
+              info_required:
+                value: { status: INFO_REQUIRED }
+      responses:
+        '200':
+          description: Updated KYC submission
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycQueueItem'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: KYC submission not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "KYC submission not found"
+                details: { errorCode: KYC_NOT_FOUND }
+        '422':
+          description: Rejection reason validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                reason_required:
+                  value: { code: 422, message: "rejectionReason is required when status is REJECTED", details: { errorCode: REJECTION_REASON_REQUIRED } }
+                reason_not_allowed:
+                  value: { code: 422, message: "rejectionReason must not be provided for non-REJECTED status", details: { errorCode: REJECTION_REASON_NOT_ALLOWED } }
+
+  # ── Transactions ─────────────────────────────────────────────────────────────
+
+  /transactions:
+    get:
+      tags: [Transactions]
+      summary: List transactions (SUPER_ADMIN, FINANCE_MANAGER, COMPLIANCE_OFFICER)
+      description: |
+        Cursor-paginated transaction list with optional filters. All filters are ANDed.
+        `amountMin` and `amountMax` filter on the transaction `amount` field.
+      parameters:
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/TransactionType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TransactionStatus'
+        - name: userId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: dateFrom
+          in: query
+          description: ISO 8601 lower bound on createdAt (inclusive)
+          schema:
+            type: string
+            format: date-time
+          example: "2026-01-01T00:00:00.000Z"
+        - name: dateTo
+          in: query
+          description: ISO 8601 upper bound on createdAt (inclusive)
+          schema:
+            type: string
+            format: date-time
+          example: "2026-12-31T23:59:59.000Z"
+        - name: amountMin
+          in: query
+          schema:
+            type: number
+            minimum: 0
+        - name: amountMax
+          in: query
+          schema:
+            type: number
+            minimum: 0
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Paginated transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedTransactions'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ModuleDisabled'
+
+  /transactions/export:
+    get:
+      tags: [Transactions]
+      summary: Export transactions as CSV
+      description: |
+        Streams all matching transactions as a CSV file. Accepts the same filters as
+        GET /transactions. The response is a streamed download with
+        `Content-Type: text/csv` and `Content-Disposition: attachment; filename="transactions.csv"`.
+        There is no pagination — the full result set is streamed.
+      parameters:
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/TransactionType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TransactionStatus'
+        - name: userId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: amountMin
+          in: query
+          schema:
+            type: number
+            minimum: 0
+        - name: amountMax
+          in: query
+          schema:
+            type: number
+            minimum: 0
+      responses:
+        '200':
+          description: CSV file stream
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="transactions.csv"'
+          content:
+            text/csv:
+              schema:
+                type: string
+              example: |
+                id,type,status,userId,amount,asset,fee,createdAt
+                "uuid","VAS","SUCCESSFUL","user-uuid","500.00","NGN","5.00","2026-05-28T10:00:00.000Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /transactions/{id}:
+    get:
+      tags: [Transactions]
+      summary: Get transaction detail
+      description: Returns full detail for a single transaction by UUID.
+      parameters:
+        - $ref: '#/components/parameters/transactionId'
+      responses:
+        '200':
+          description: Transaction detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          description: Invalid UUID format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Transaction not found"
+                details: { errorCode: TRANSACTION_NOT_FOUND }
+
+  /transactions/{id}/reverse:
+    post:
+      tags: [Transactions]
+      summary: Reverse a VAS transaction
+      description: |
+        Reverses a VAS transaction. Only applicable to transactions with `type = VAS` and
+        `status = CONFIRMED` or `SUCCESSFUL`. Publishes a reversal event to the VAS service
+        via RabbitMQ. Returns the updated transaction with `status = REVERSED`.
+      parameters:
+        - $ref: '#/components/parameters/transactionId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VasActionRequest'
+            example:
+              reason: "Customer reported incorrect service delivery"
+      responses:
+        '201':
+          description: Reversal initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Transaction not found"
+                details: { errorCode: TRANSACTION_NOT_FOUND }
+        '422':
+          description: Transaction type or status does not permit reversal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 422
+                message: "Only confirmed or successful VAS transactions can be reversed"
+                details: { errorCode: INVALID_TRANSACTION_STATE }
+
+  /transactions/{id}/retry:
+    post:
+      tags: [Transactions]
+      summary: Retry a failed VAS transaction
+      description: |
+        Retries a VAS transaction. Only applicable to transactions with `type = VAS` and
+        `status = FAILED` or `CANCELLED`. Publishes a retry event to the VAS service.
+      parameters:
+        - $ref: '#/components/parameters/transactionId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VasActionRequest'
+            example:
+              reason: "Retrying after provider outage resolved"
+      responses:
+        '201':
+          description: Retry initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Transaction not found"
+                details: { errorCode: TRANSACTION_NOT_FOUND }
+        '422':
+          description: Transaction type or status does not permit retry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 422
+                message: "Only failed or cancelled VAS transactions can be retried"
+                details: { errorCode: INVALID_TRANSACTION_STATE }
+
+  # ── Finance ──────────────────────────────────────────────────────────────────
+
+  /finance/wallets:
+    get:
+      tags: [Finance]
+      summary: List wallet balances (SUPER_ADMIN, FINANCE_MANAGER)
+      description: Returns all wallet balance records (hot and cold wallets for each asset).
+      responses:
+        '200':
+          description: Wallet balance list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WalletBalanceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ModuleDisabled'
+
+    post:
+      tags: [Finance]
+      summary: Create a wallet balance record (SUPER_ADMIN, FINANCE_MANAGER)
+      description: Creates a new wallet balance record for an asset. Returns 409 if the asset already has a record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWalletRequest'
+            example:
+              asset: ETH
+              walletType: HOT
+              alertThreshold: 0.5
+      responses:
+        '201':
+          description: Wallet created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletBalanceResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Wallet balance record already exists for this asset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: "Wallet balance for asset 'ETH' already exists"
+                details: { errorCode: WALLET_ALREADY_EXISTS }
+
+  /finance/wallets/{asset}/threshold:
+    patch:
+      tags: [Finance]
+      summary: Set low-balance alert threshold (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Updates the alert threshold for a wallet. The background WalletWatcherWorker fires a
+        RabbitMQ event when the balance drops below this value.
+        The request body must include both `asset` (matching the path parameter) and `threshold`.
+      parameters:
+        - name: asset
+          in: path
+          required: true
+          description: Asset ticker (e.g. BTC, ETH, NGN)
+          schema:
+            type: string
+          example: BTC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WalletThresholdRequest'
+            example:
+              asset: BTC
+              threshold: 0.1
+      responses:
+        '200':
+          description: Updated wallet balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletBalanceResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Wallet not found for this asset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Wallet for asset 'BTC' not found"
+                details: { errorCode: WALLET_NOT_FOUND }
+
+  /finance/adjustments:
+    post:
+      tags: [Finance]
+      summary: Request a manual balance adjustment (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Requests a credit or debit adjustment to a wallet balance.
+
+        **Maker-Checker flow:**
+        - If `amount` (in NGN equivalent) is **below** the `APPROVAL_THRESHOLD_NGN` (default 1,000,000):
+          the adjustment is executed immediately. Response is `ImmediateAdjustmentResponse`.
+        - If `amount` is **at or above** the threshold: a pending approval record is created.
+          Response is `PendingAdjustmentResponse` containing `approvalId`.
+          A second admin must approve via POST /finance/adjustments/{id}/approve.
+          The maker **cannot approve their own adjustment** (403 SELF_APPROVAL_FORBIDDEN).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAdjustmentRequest'
+            examples:
+              immediate:
+                summary: Below threshold — executed immediately
+                value:
+                  asset: BTC
+                  amount: 0.001
+                  direction: CREDIT
+                  reason: "Manual top-up for operational liquidity"
+              pending_approval:
+                summary: Above threshold — requires second admin
+                value:
+                  asset: NGN
+                  amount: 5000000
+                  direction: DEBIT
+                  reason: "Reconciliation adjustment per finance team request"
+      responses:
+        '201':
+          description: Adjustment created (immediate or pending)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ImmediateAdjustmentResponse'
+                  - $ref: '#/components/schemas/PendingAdjustmentResponse'
+              examples:
+                immediate:
+                  value: { adjustmentId: "adj-uuid-here" }
+                pending:
+                  value: { approvalId: "approval-uuid", adjustmentId: "adj-uuid-here" }
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /finance/adjustments/{id}/approve:
+    post:
+      tags: [Finance]
+      summary: Approve a pending adjustment (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Approves a pending adjustment and executes it against the wallet balance.
+        The approver **cannot** be the same admin who created the adjustment
+        (returns 403 SELF_APPROVAL_FORBIDDEN).
+        Returns 404 if the adjustment does not exist or is not in PENDING_APPROVAL state.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Adjustment ID (returned in PendingAdjustmentResponse.adjustmentId)
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Adjustment approved and executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdjustmentResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not authorised or self-approval attempted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                forbidden:
+                  value: { code: 403, message: "Access denied", details: { errorCode: FORBIDDEN } }
+                self_approval:
+                  value: { code: 403, message: "You cannot approve your own adjustment", details: { errorCode: SELF_APPROVAL_FORBIDDEN } }
+        '404':
+          description: Adjustment not found or not in pending state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Approval record not found"
+                details: { errorCode: APPROVAL_NOT_FOUND }
+
+  /finance/adjustments/{id}/reject:
+    post:
+      tags: [Finance]
+      summary: Reject a pending adjustment (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Rejects a pending adjustment. The adjustment status is set to REJECTED.
+        Same self-action restriction as approve.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Adjustment rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdjustmentResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Adjustment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: "Approval record not found"
+                details: { errorCode: APPROVAL_NOT_FOUND }
+
+  /finance/withdrawals:
+    get:
+      tags: [Finance]
+      summary: List withdrawal queue (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Cursor-paginated withdrawal queue. Filter by status, asset, or risk flag.
+        `isHighRisk: true` filters withdrawals whose destination address matched the
+        Chainalysis or internal blocklist.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/WithdrawalStatus'
+        - name: asset
+          in: query
+          schema:
+            type: string
+          example: BTC
+        - name: isHighRisk
+          in: query
+          schema:
+            type: boolean
+          description: true to show only high-risk withdrawals
+        - $ref: '#/components/parameters/cursor'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Paginated withdrawal queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedWithdrawals'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ModuleDisabled'
+
+  /finance/withdrawals/approve:
+    post:
+      tags: [Finance]
+      summary: Bulk approve withdrawals (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Approves up to **100** PENDING withdrawals in a single request.
+        Each withdrawal in the array is processed individually. If one fails the rest continue.
+        Returns counts of processed and failed items.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkApproveWithdrawalRequest'
+            example:
+              withdrawalIds:
+                - "w-uuid-1"
+                - "w-uuid-2"
+      responses:
+        '200':
+          description: Bulk operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkApproveResult'
+              example:
+                processed: 2
+                failed: 0
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /finance/withdrawals/reject:
+    post:
+      tags: [Finance]
+      summary: Bulk reject withdrawals (SUPER_ADMIN, FINANCE_MANAGER)
+      description: |
+        Rejects up to **100** PENDING withdrawals. A rejection reason is required and is
+        stored on each withdrawal record.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkRejectWithdrawalRequest'
+            example:
+              withdrawalIds:
+                - "w-uuid-1"
+              reason: "Destination address flagged as high-risk"
+      responses:
+        '200':
+          description: Bulk rejection result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkRejectResult'
+              example:
+                processed: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ── Pricing ──────────────────────────────────────────────────────────────────
+
+  /pricing/spreads:
+    get:
+      tags: [Pricing]
+      summary: List all asset pair spreads
+      description: |
+        Returns all asset pair spreads currently stored.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: listSpreads
+      responses:
+        '200':
+          description: Array of spread records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssetSpreadResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Pricing]
+      summary: Create a new asset pair spread
+      description: |
+        Creates a spread for a new asset pair. Returns 409 if the `assetPair` already exists.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: createSpread
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSpreadRequest'
+      responses:
+        '201':
+          description: Spread created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetSpreadResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Spread already exists for this asset pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: Spread for asset pair 'BTC/NGN' already exists
+                details:
+                  errorCode: SPREAD_ALREADY_EXISTS
+
+  /pricing/spreads/{assetPair}:
+    patch:
+      tags: [Pricing]
+      summary: Update spread for an asset pair
+      description: |
+        Updates the spread value and propagates the change via Redis pub/sub to wallet-service.
+        URL-encode the `assetPair` path parameter (e.g. `BTC%2FNGN`).
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: updateSpread
+      parameters:
+        - name: assetPair
+          in: path
+          required: true
+          schema:
+            type: string
+          example: BTC%2FNGN
+          description: URL-encoded asset pair (e.g. BTC%2FNGN for BTC/NGN)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSpreadRequest'
+      responses:
+        '200':
+          description: Updated spread record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetSpreadResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Spread not found for the given asset pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /pricing/fees:
+    get:
+      tags: [Pricing]
+      summary: List all active fee rules
+      description: |
+        Returns all fee rules where `isActive = true`.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: listFeeRules
+      responses:
+        '200':
+          description: Array of active fee rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FeeRuleResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Pricing]
+      summary: Create a new fee rule
+      description: |
+        Creates a fee rule for a given transaction type.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: createFeeRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFeeRuleRequest'
+      responses:
+        '201':
+          description: Fee rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeeRuleResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /pricing/fees/{feeId}:
+    patch:
+      tags: [Pricing]
+      summary: Update a fee rule
+      description: |
+        Partially updates an existing fee rule. All fields are optional.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: updateFeeRule
+      parameters:
+        - name: feeId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateFeeRuleRequest'
+      responses:
+        '200':
+          description: Updated fee rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeeRuleResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [Pricing]
+      summary: Soft-deactivate a fee rule
+      description: |
+        Sets `isActive = false`. The record is never hard-deleted (audit requirement SC-010).
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: deactivateFeeRule
+      parameters:
+        - name: feeId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Fee rule deactivated
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Fee rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /pricing/assets:
+    get:
+      tags: [Pricing]
+      summary: List all assets
+      description: |
+        Returns all registered assets with their enabled/disabled status.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: listAssets
+      responses:
+        '200':
+          description: Array of asset records
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssetResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Pricing]
+      summary: Create a new asset
+      description: |
+        Registers a new asset ticker. Returns 409 if the ticker already exists.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: createAsset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssetRequest'
+      responses:
+        '201':
+          description: Asset created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Asset ticker already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /pricing/assets/{asset}/toggle:
+    patch:
+      tags: [Pricing]
+      summary: Enable or disable an asset
+      description: |
+        Toggles asset availability. Writes `asset:enabled:{asset}` to Redis immediately after DB update.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: toggleAsset
+      parameters:
+        - name: asset
+          in: path
+          required: true
+          schema:
+            type: string
+          example: BTC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToggleAssetRequest'
+      responses:
+        '200':
+          description: Updated asset record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Asset not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Risk ──────────────────────────────────────────────────────────────────────
+
+  /risk/rules:
+    get:
+      tags: [Risk]
+      summary: List all active risk rules
+      description: |
+        Returns all risk rules where `isActive = true`.
+        Returns 503 if the risk module feature flag is disabled.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: listRiskRules
+      responses:
+        '200':
+          description: Array of active risk rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RiskRuleResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ModuleDisabled'
+
+    post:
+      tags: [Risk]
+      summary: Create a new risk rule
+      description: |
+        Creates a risk evaluation rule and immediately invalidates the `rules:cache` in Redis.
+        Returns 503 if the risk module feature flag is disabled.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: createRiskRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRiskRuleRequest'
+      responses:
+        '201':
+          description: Risk rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskRuleResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ModuleDisabled'
+
+  /risk/rules/{id}:
+    patch:
+      tags: [Risk]
+      summary: Update a risk rule
+      description: |
+        Partially updates an existing rule and invalidates `rules:cache`.
+        Returns 404 if the rule is not found or already inactive.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: updateRiskRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRiskRuleRequest'
+      responses:
+        '200':
+          description: Updated risk rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskRuleResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Rule not found or already inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: Risk rule '...' not found
+                details:
+                  errorCode: RISK_RULE_NOT_FOUND
+
+    delete:
+      tags: [Risk]
+      summary: Soft-deactivate a risk rule
+      description: |
+        Sets `isActive = false` and invalidates `rules:cache`. Never hard-deletes.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: deactivateRiskRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Rule deactivated
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /risk/flagged:
+    get:
+      tags: [Risk]
+      summary: List flagged transactions
+      description: |
+        Cursor-paginated list of transactions that have been flagged (automatically by rules or manually).
+        Optionally filter by `flaggedBy` source or `dateFrom`.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: listFlaggedTransactions
+      parameters:
+        - name: flaggedBy
+          in: query
+          schema:
+            $ref: '#/components/schemas/FlagSourceEnum'
+          description: Filter by flag source (RULE or MANUAL)
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 lower bound on flaggedAt (inclusive)
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Paginated flagged transactions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedFlaggedTransactions'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /risk/flagged/{txId}/flag:
+    post:
+      tags: [Risk]
+      summary: Manually flag a transaction
+      description: |
+        Sets `flagged = true`, `flaggedBy = MANUAL`, and records the reason.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: flagTransaction
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualFlagRequest'
+      responses:
+        '200':
+          description: Updated transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlaggedTransactionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /risk/flagged/{txId}/unflag:
+    post:
+      tags: [Risk]
+      summary: Remove a flag from a transaction
+      description: |
+        Clears the flag: sets `flagged = false`, `flaggedBy = null`, `flaggedAt = null`.
+        A `justification` is required for audit purposes.
+        **Roles**: SUPER_ADMIN, COMPLIANCE_OFFICER
+      operationId: unflagTransaction
+      parameters:
+        - name: txId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualUnflagRequest'
+      responses:
+        '200':
+          description: Updated transaction with flag cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlaggedTransactionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── VAS ───────────────────────────────────────────────────────────────────────
+
+  /vas/providers:
+    get:
+      tags: [VAS]
+      summary: List all VAS providers
+      description: |
+        Returns all VAS providers with health status, balance, and last ping time.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: listVasProviders
+      responses:
+        '200':
+          description: Array of VAS providers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VasProviderResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [VAS]
+      summary: Create a new VAS provider
+      description: |
+        Registers a new VAS provider. Returns 409 if a provider with the same name already exists.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: createVasProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVasProviderRequest'
+      responses:
+        '201':
+          description: VAS provider created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VasProviderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Provider name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: VAS provider already exists
+                details:
+                  errorCode: VAS_PROVIDER_ALREADY_EXISTS
+
+  /vas/providers/{id}/toggle:
+    patch:
+      tags: [VAS]
+      summary: Enable or disable a VAS provider
+      description: |
+        Toggles the `isEnabled` flag on a provider.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: toggleVasProvider
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToggleRequest'
+      responses:
+        '200':
+          description: Updated VAS provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VasProviderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Provider not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /vas/products:
+    get:
+      tags: [VAS]
+      summary: List all VAS products
+      description: |
+        Returns all VAS products with provider context.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: listVasProducts
+      responses:
+        '200':
+          description: Array of VAS products
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VasProductResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [VAS]
+      summary: Create a new VAS product
+      description: |
+        Creates a product under an existing provider.
+        Returns 404 if `providerId` does not exist.
+        Returns 409 if the `sku` is already registered.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: createVasProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVasProductRequest'
+      responses:
+        '201':
+          description: VAS product created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VasProductResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Provider not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 404
+                message: VAS provider not found
+                details:
+                  errorCode: VAS_PROVIDER_NOT_FOUND
+        '409':
+          description: SKU already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 409
+                message: VAS product with this SKU already exists
+                details:
+                  errorCode: VAS_PRODUCT_SKU_ALREADY_EXISTS
+
+  /vas/products/{id}/toggle:
+    patch:
+      tags: [VAS]
+      summary: Enable or disable a VAS product
+      description: |
+        Toggles the `isEnabled` flag on a product.
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER
+      operationId: toggleVasProduct
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToggleRequest'
+      responses:
+        '200':
+          description: Updated VAS product
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VasProductResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Product not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Support ───────────────────────────────────────────────────────────────────
+
+  /support/tickets:
+    get:
+      tags: [Support]
+      summary: List support tickets
+      description: |
+        Cursor-paginated list of support tickets. Optionally filter by `status` or `assignedTo`.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: listTickets
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/TicketStatusEnum'
+        - name: assignedTo
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by assigned admin ID
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Paginated tickets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedTickets'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Support]
+      summary: Create a support ticket
+      description: |
+        Opens a new support ticket on behalf of a user.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: createTicket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTicketRequest'
+      responses:
+        '201':
+          description: Ticket created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportTicketResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /support/tickets/{id}:
+    get:
+      tags: [Support]
+      summary: Get ticket detail with full reply thread
+      description: |
+        Returns a single ticket including the complete `replies` array.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: getTicket
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Ticket with replies
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportTicketResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Ticket not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /support/tickets/{id}/replies:
+    post:
+      tags: [Support]
+      summary: Append a reply to a ticket
+      description: |
+        Adds a reply from the acting admin to a ticket thread.
+        Returns 409 if the ticket status is CLOSED (CLOSED is terminal — no replies allowed).
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: replyToTicket
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplyTicketRequest'
+      responses:
+        '201':
+          description: Reply created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketReplyResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Ticket not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Ticket is CLOSED — cannot reply
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /support/tickets/{id}/status:
+    patch:
+      tags: [Support]
+      summary: Update ticket status
+      description: |
+        Transitions a ticket to a new status. Valid transitions:
+        - OPEN → IN_PROGRESS, CLOSED
+        - IN_PROGRESS → OPEN, CLOSED
+        - CLOSED → *(terminal — no transitions allowed)*
+
+        Returns 422 for invalid transition attempts.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: updateTicketStatus
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTicketStatusRequest'
+      responses:
+        '200':
+          description: Updated ticket
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportTicketResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Ticket not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid status transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /support/notifications:
+    post:
+      tags: [Support]
+      summary: Enqueue a push notification
+      description: |
+        Enqueues a push notification to be sent to the specified user.
+        Returns 202 immediately with a `jobId` — delivery is asynchronous.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: sendPushNotification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendNotificationRequest'
+      responses:
+        '202':
+          description: Notification enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId]
+                properties:
+                  jobId:
+                    type: string
+                    description: Bull queue job ID for status tracking
+              example:
+                jobId: "42"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /support/banners:
+    get:
+      tags: [Support]
+      summary: List active banners
+      description: |
+        Returns active banners served from Redis cache (5-minute TTL).
+        **Roles**: SUPER_ADMIN, FINANCE_MANAGER, COMPLIANCE_OFFICER, CUSTOMER_SUPPORT
+      operationId: listBanners
+      responses:
+        '200':
+          description: Array of active banners
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BannerResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Support]
+      summary: Create a banner
+      description: |
+        Creates a new app banner and invalidates the banner cache.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: createBanner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBannerRequest'
+      responses:
+        '201':
+          description: Banner created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BannerResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /support/banners/{id}:
+    patch:
+      tags: [Support]
+      summary: Update a banner
+      description: |
+        Partially updates a banner and invalidates the cache.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: updateBanner
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBannerRequest'
+      responses:
+        '200':
+          description: Updated banner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BannerResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Banner not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [Support]
+      summary: Soft-delete a banner
+      description: |
+        Sets `deletedAt` on the banner and invalidates the cache.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: deleteBanner
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Banner deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Banner not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /support/templates:
+    get:
+      tags: [Support]
+      summary: List email templates
+      description: |
+        Returns all registered email templates.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: listEmailTemplates
+      responses:
+        '200':
+          description: Array of email templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EmailTemplateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Support]
+      summary: Create an email template
+      description: |
+        Creates a new Handlebars email template. Validates Handlebars syntax before saving.
+        Returns 409 if a template with the same name already exists.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: createEmailTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+      responses:
+        '201':
+          description: Template created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailTemplateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Template name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /support/templates/{id}:
+    patch:
+      tags: [Support]
+      summary: Update an email template
+      description: |
+        Partially updates a template. Validates Handlebars syntax before saving.
+        **Roles**: SUPER_ADMIN, CUSTOMER_SUPPORT
+      operationId: updateEmailTemplate
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTemplateRequest'
+      responses:
+        '200':
+          description: Updated template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailTemplateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Analytics ─────────────────────────────────────────────────────────────────
+
+  /analytics/overview:
+    get:
+      tags: [Analytics]
+      summary: Today's overview metrics
+      description: |
+        Returns today's DAU, revenue, and total volume from the latest analytics snapshots.
+        **Roles**: All authenticated roles
+      operationId: getAnalyticsOverview
+      responses:
+        '200':
+          description: Overview metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsOverview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/users:
+    get:
+      tags: [Analytics]
+      summary: DAU/WAU/MAU user metrics
+      description: |
+        Returns time-series user counts (DAU, WAU, or MAU) for a date range.
+        Maximum date range: 366 days.
+        **Roles**: All authenticated roles
+      operationId: getUserMetrics
+      parameters:
+        - name: period
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/AnalyticsPeriodEnum'
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 start of range (inclusive)
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 end of range (inclusive)
+      responses:
+        '200':
+          description: User metric data points
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DataPoint'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/volumes:
+    get:
+      tags: [Analytics]
+      summary: Transaction volume metrics
+      description: |
+        Returns swap, withdrawal, and funding volumes broken down by period and date range.
+        Maximum date range: 366 days.
+        **Roles**: All authenticated roles
+      operationId: getVolumeMetrics
+      parameters:
+        - name: period
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/AnalyticsPeriodEnum'
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Volume data points
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VolumeDataPoint'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/revenue:
+    get:
+      tags: [Analytics]
+      summary: Fee revenue report
+      description: |
+        Returns fee revenue totals broken down by transaction type and period.
+        Maximum date range: 366 days.
+        **Roles**: All authenticated roles
+      operationId: getRevenueReport
+      parameters:
+        - name: period
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/AnalyticsPeriodEnum'
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Revenue data points
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RevenueDataPoint'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/kyc-funnel:
+    get:
+      tags: [Analytics]
+      summary: KYC conversion funnel
+      description: |
+        Returns KYC submission counts by status for the requested date range.
+        **Roles**: All authenticated roles
+      operationId: getKycFunnel
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 start of range (inclusive)
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 end of range (inclusive)
+      responses:
+        '200':
+          description: KYC funnel data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KycFunnelData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/vasp:
+    get:
+      tags: [Analytics]
+      summary: VASP licence monitoring
+      description: |
+        Returns actual transaction volumes vs. the NGN regulatory threshold,
+        with a per-asset breakdown. `thresholdBreached: true` means the threshold
+        has been exceeded and requires immediate attention.
+        **Roles**: All authenticated roles
+      operationId: getVaspMonitoring
+      responses:
+        '200':
+          description: VASP monitoring data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaspMonitoringData'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/reports:
+    post:
+      tags: [Analytics]
+      summary: Enqueue a PDF report
+      description: |
+        Enqueues an async PDF generation job. Returns 202 with a `jobId` immediately.
+        Poll `GET /analytics/reports/{jobId}` to check status and retrieve the download URL.
+
+        **Report types and supported filters:**
+        - `REVENUE` / `VOLUME` — `filters.period` (DAILY|WEEKLY|MONTHLY), `filters.from`, `filters.to`
+        - `KYC` — `filters.status`, `filters.from`, `filters.to`
+        - `VASP` — no filters
+
+        **Roles**: All authenticated roles
+      operationId: enqueueReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnqueueReportRequest'
+      responses:
+        '202':
+          description: Report job enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId]
+                properties:
+                  jobId:
+                    type: string
+                    format: uuid
+              example:
+                jobId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /analytics/reports/{jobId}:
+    get:
+      tags: [Analytics]
+      summary: Poll PDF report status
+      description: |
+        Returns the current status of a PDF report job.
+        When `status = COMPLETE`, the response includes a `downloadUrl` — a pre-signed S3 URL
+        valid for **15 minutes**. Do not cache this URL.
+        **Roles**: All authenticated roles
+      operationId: getReportStatus
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Report job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PdfReportStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Report job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /analytics/audit-log:
+    get:
+      tags: [Analytics]
+      summary: Search the audit log
+      description: |
+        Cursor-paginated, searchable audit log of all admin actions.
+        Supports filtering by `adminId`, `action`, `entityType`, and date range.
+        **Roles**: SUPER_ADMIN only
+      operationId: searchAuditLog
+      parameters:
+        - name: adminId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by acting admin
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Filter by action string (e.g. UPDATE_USER_STATUS)
+        - name: entityType
+          in: query
+          schema:
+            type: string
+          description: Filter by entity type (e.g. User, KycSubmission)
+        - name: dateFrom
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 lower bound on createdAt (inclusive)
+        - name: dateTo
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: ISO-8601 upper bound on createdAt (inclusive)
+        - $ref: '#/components/parameters/cursor'
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Paginated audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAuditLog'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access token obtained from POST /auth/totp/verify.
+        Valid for 15 minutes (expiresIn: 900). Refresh proactively using POST /auth/refresh.
+        On 401 TOKEN_REVOKED: the token was explicitly logged out — redirect to login.
+        On 401 SESSION_EXPIRED: inactivity timeout — redirect to login.
+
+  parameters:
+    cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque pagination cursor from the previous response's `meta.nextCursor`.
+        Omit to fetch the first page. Do not decode or modify.
+      schema:
+        type: string
+    limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    adminId:
+      name: adminId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Admin account UUID
+    userId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: User UUID
+    transactionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Transaction UUID
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, revoked, or expired Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            token_revoked:
+              value: { code: 401, message: "Token has been revoked", details: { errorCode: TOKEN_REVOKED } }
+            session_expired:
+              value: { code: 401, message: "Session has expired or is invalid", details: { errorCode: SESSION_EXPIRED } }
+    Forbidden:
+      description: Authenticated but insufficient role
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 403
+            message: "Access denied"
+            details: { errorCode: FORBIDDEN }
+    ValidationError:
+      description: Request body failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 400
+            message: "Validation failed"
+            details: { errorCode: VALIDATION_ERROR }
+    InvalidCredentials:
+      description: Email or password incorrect
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 401
+            message: "Invalid email or password"
+            details: { errorCode: INVALID_CREDENTIALS }
+    AccountSuspended:
+      description: Account is suspended or deactivated
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 403
+            message: "This account has been suspended or deactivated"
+            details: { errorCode: ACCOUNT_SUSPENDED }
+    TooManyAttempts:
+      description: Rate limit exceeded — too many failed login attempts
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 429
+            message: "Too many failed login attempts — try again in 10 minutes"
+            details: { errorCode: TOO_MANY_ATTEMPTS }
+    AdminNotFound:
+      description: Admin account not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 404
+            message: "Admin not found"
+            details: { errorCode: ADMIN_NOT_FOUND }
+    UserNotFound:
+      description: User not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 404
+            message: "User not found"
+            details: { errorCode: USER_NOT_FOUND }
+    ModuleDisabled:
+      description: The module is temporarily disabled via feature flag
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            code: 503
+            message: "The module is currently disabled"
+            details: { errorCode: MODULE_DISABLED }
+
+  schemas:
+
+    # ── Error ──────────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: HTTP status code mirrored in the body
+          example: 404
+        message:
+          type: string
+          description: Human-readable error description
+          example: "Resource not found"
+        details:
+          type: ["object", "null"]
+          properties:
+            errorCode:
+              type: string
+              description: Machine-readable error code for programmatic handling
+              example: ADMIN_NOT_FOUND
+          example: { errorCode: ADMIN_NOT_FOUND }
+
+    # ── Auth ───────────────────────────────────────────────────────────────────
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          minLength: 8
+          example: "SuperSecret123"
+
+    LoginResult:
+      type: object
+      required: [sessionToken, mfaRequired]
+      properties:
+        sessionToken:
+          type: string
+          format: uuid
+          description: Opaque token valid for 5 minutes. Pass to POST /auth/totp/verify.
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        mfaRequired:
+          type: boolean
+          enum: [true]
+          example: true
+
+    TotpVerifyRequest:
+      type: object
+      required: [sessionToken, totpToken]
+      properties:
+        sessionToken:
+          type: string
+          description: Token returned by POST /auth/login
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        totpToken:
+          type: string
+          minLength: 6
+          maxLength: 6
+          description: 6-digit TOTP code from authenticator app
+          example: "123456"
+
+    TokenResponse:
+      type: object
+      required: [accessToken, refreshToken, expiresIn, admin]
+      properties:
+        accessToken:
+          type: string
+          description: JWT. Attach as Authorization Bearer on every protected request. Valid for 15 minutes.
+          example: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhZG1pbi11dWlkIn0.signature"
+        refreshToken:
+          type: string
+          description: Opaque token. Valid 7 days. Rotates on every use — immediately invalidate after use.
+          example: "session-uuid.raw-secret-string"
+        expiresIn:
+          type: integer
+          description: Seconds until accessToken expires. Always 900 (15 minutes).
+          example: 900
+        admin:
+          $ref: '#/components/schemas/AdminProfile'
+
+    ForcePasswordChangeResponse:
+      type: object
+      required: [forcePasswordChange]
+      description: |
+        Returned by POST /auth/totp/verify when the account requires a password change.
+        No JWT is issued. Frontend must redirect to the change-password screen and call
+        POST /auth/change-password before proceeding.
+      properties:
+        forcePasswordChange:
+          type: boolean
+          enum: [true]
+          example: true
+
+    TotpSetupResult:
+      type: object
+      required: [otpauthUrl, secret]
+      properties:
+        otpauthUrl:
+          type: string
+          description: |
+            otpauth:// URI — render as QR code for the admin to scan with their authenticator app.
+          example: "otpauth://totp/Admin:alice%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Admin"
+        secret:
+          type: string
+          description: Base32 TOTP secret. Display alongside QR code for manual entry.
+          example: "JBSWY3DPEHPK3PXP"
+
+    TotpConfirmRequest:
+      type: object
+      required: [totpToken]
+      properties:
+        totpToken:
+          type: string
+          minLength: 6
+          maxLength: 6
+          example: "654321"
+
+    RefreshTokenRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+          description: Refresh token from the last successful login or refresh call
+          example: "session-uuid.raw-secret-string"
+
+    ChangePasswordRequest:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          example: "OldPassword123"
+        newPassword:
+          type: string
+          minLength: 12
+          description: Must be at least 12 characters and differ from the current password
+          example: "NewStrongerPass456!"
+
+    # ── Admin ──────────────────────────────────────────────────────────────────
+
+    AdminRole:
+      type: string
+      enum: [SUPER_ADMIN, COMPLIANCE_OFFICER, FINANCE_MANAGER, CUSTOMER_SUPPORT]
+
+    AdminStatus:
+      type: string
+      enum: [PENDING, ACTIVE, SUSPENDED, DEACTIVATED]
+      description: |
+        - PENDING: invited but not yet activated — cannot log in
+        - ACTIVE: normal access
+        - SUSPENDED: login blocked; existing JWTs valid until expiry
+        - DEACTIVATED: permanently disabled
+
+    AdminProfile:
+      type: object
+      required: [id, email, role, status, mfaEnrolled, forcePasswordChange]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/AdminRole'
+        status:
+          $ref: '#/components/schemas/AdminStatus'
+        mfaEnrolled:
+          type: boolean
+          description: true once the admin has completed TOTP setup and confirmation
+        forcePasswordChange:
+          type: boolean
+          description: When true the admin must change their password before using the dashboard
+        lastLoginAt:
+          type: ["string", "null"]
+          format: date-time
+          description: UTC timestamp of last successful login. null if never logged in.
+          example: "2026-05-28T12:00:00.000Z"
+
+    AdminDetail:
+      allOf:
+        - $ref: '#/components/schemas/AdminProfile'
+        - type: object
+          required: [recentActivity, actionSummary]
+          properties:
+            recentActivity:
+              type: array
+              description: Last 20 audit log entries for this admin
+              items:
+                type: object
+                properties:
+                  action:
+                    type: string
+                  entityType:
+                    type: string
+                  entityId:
+                    type: ["string", "null"]
+                  ipAddress:
+                    type: string
+                  createdAt:
+                    type: string
+                    format: date-time
+            actionSummary:
+              type: array
+              description: Aggregate counts of actions performed by this admin
+              items:
+                type: object
+                properties:
+                  action:
+                    type: string
+                  count:
+                    type: integer
+
+    ListAdminsResult:
+      type: object
+      required: [data, nextCursor, hasNextPage]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminProfile'
+        nextCursor:
+          type: ["string", "null"]
+          description: Pass as cursor on next request. null when no more pages.
+        hasNextPage:
+          type: boolean
+
+    InviteAdminRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/AdminRole'
+
+    InviteAdminResult:
+      type: object
+      required: [adminId, email]
+      properties:
+        adminId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+
+    ActivateAdminRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token:
+          type: string
+          description: One-time token from the invite email
+        password:
+          type: string
+          description: Admin's chosen password
+
+    UpdateAdminRequest:
+      type: object
+      description: All fields are optional — include only those to change.
+      properties:
+        status:
+          $ref: '#/components/schemas/AdminStatus'
+        role:
+          $ref: '#/components/schemas/AdminRole'
+        confirmRoleChange:
+          type: boolean
+          description: |
+            Required when changing role and the admin has active sessions.
+            Acknowledges that existing JWTs will retain the old role until they expire (max 15 min).
+        forcePasswordChange:
+          type: boolean
+          description: When true the admin must change their password on next login
+
+    MfaResetRequest:
+      type: object
+      required: [offlineVerificationNote]
+      properties:
+        offlineVerificationNote:
+          type: string
+          description: Documents how admin identity was verified offline before MFA reset
+          example: "Identity verified via Zoom call on 2026-05-28"
+
+    # ── User ───────────────────────────────────────────────────────────────────
+
+    UserAccountStatus:
+      type: string
+      enum: [ACTIVE, FROZEN, SHADOW_BANNED]
+
+    KycStatus:
+      type: string
+      enum: [NOT_STARTED, PENDING, UNDER_REVIEW, APPROVED, REJECTED]
+
+    UserSummary:
+      type: object
+      required: [id, email, fullName, phone, accountStatus, kycStatus, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        fullName:
+          type: string
+        phone:
+          type: string
+        accountStatus:
+          $ref: '#/components/schemas/UserAccountStatus'
+        kycStatus:
+          $ref: '#/components/schemas/KycStatus'
+        createdAt:
+          type: string
+          format: date-time
+
+    FiatBalance:
+      type: object
+      required: [currency, available, ledger]
+      properties:
+        currency:
+          type: string
+          example: NGN
+        available:
+          type: string
+          description: Decimal string — use parseFloat or BigDecimal
+          example: "150000.50"
+        ledger:
+          type: string
+          description: Total ledger balance including locked funds
+          example: "155000.00"
+
+    CryptoBalance:
+      type: object
+      required: [asset, available, locked, usdValue]
+      properties:
+        asset:
+          type: string
+          example: BTC
+        available:
+          type: string
+          example: "0.05000000"
+        locked:
+          type: string
+          example: "0.01000000"
+        usdValue:
+          type: string
+          description: USD equivalent of total balance
+          example: "3200.00"
+
+    DeviceFingerprint:
+      type: object
+      required: [id, deviceName, platform, lastSeenAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        deviceName:
+          type: string
+          example: "iPhone 15 Pro"
+        platform:
+          type: string
+          example: "iOS"
+        lastSeenAt:
+          type: string
+          format: date-time
+
+    UserNoteView:
+      type: object
+      required: [id, userId, adminId, adminEmail, content, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        adminId:
+          type: string
+          format: uuid
+        adminEmail:
+          type: string
+          format: email
+        content:
+          type: string
+          maxLength: 2000
+        createdAt:
+          type: string
+          format: date-time
+        deletedAt:
+          type: ["string", "null"]
+          format: date-time
+
+    UserDetail:
+      allOf:
+        - $ref: '#/components/schemas/UserSummary'
+        - type: object
+          required: [fiatBalances, cryptoBalances, deviceFingerprints, internalNotes]
+          properties:
+            fiatBalances:
+              type: array
+              items:
+                $ref: '#/components/schemas/FiatBalance'
+            cryptoBalances:
+              type: array
+              items:
+                $ref: '#/components/schemas/CryptoBalance'
+            deviceFingerprints:
+              type: array
+              items:
+                $ref: '#/components/schemas/DeviceFingerprint'
+            internalNotes:
+              type: array
+              items:
+                $ref: '#/components/schemas/UserNoteView'
+
+    PaginatedMeta:
+      type: object
+      required: [nextCursor, hasMore]
+      properties:
+        nextCursor:
+          type: ["string", "null"]
+          description: Opaque cursor for the next page. null when no further pages exist.
+          example: "dXNlci11dWlkLTEyMw=="
+        hasMore:
+          type: boolean
+          example: true
+        total:
+          type: integer
+          description: Total record count matching the current filters
+          example: 142
+
+    PaginatedUsers:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserSummary'
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/PaginatedMeta'
+            - type: object
+              properties:
+                limit:
+                  type: integer
+                  example: 50
+
+    PaginatedNotes:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserNoteView'
+        meta:
+          $ref: '#/components/schemas/PaginatedMeta'
+
+    UpdateUserStatusRequest:
+      type: object
+      required: [status, reason]
+      properties:
+        status:
+          $ref: '#/components/schemas/UserAccountStatus'
+        reason:
+          type: string
+          maxLength: 500
+          description: Mandatory reason recorded in the audit log
+
+    CreateNoteRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          maxLength: 2000
+
+    # ── KYC ────────────────────────────────────────────────────────────────────
+
+    KycQueueStatusFilter:
+      type: string
+      enum: [PENDING, APPROVED, REJECTED, INFO_REQUIRED, NOT_SUBMITTED]
+      description: |
+        NOT_SUBMITTED is a UI-only sentinel — no DB rows have this status.
+        Passing it as the sole filter returns an empty result set.
+
+    KycRejectionReason:
+      type: string
+      enum: [BLURRY_DOCUMENT, EXPIRED_ID, FACE_MISMATCH, INCOMPLETE_INFO, SUSPECTED_FRAUD]
+
+    AllowedKycTransition:
+      type: string
+      enum: [APPROVED, REJECTED, INFO_REQUIRED]
+
+    KycQueueItem:
+      type: object
+      required: [id, userId, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          description: Current KYC submission status
+          example: PENDING
+        idDocumentUrl:
+          type: ["string", "null"]
+          description: |
+            Pre-signed S3 GET URL for the government-issued ID document.
+            Valid for exactly **60 seconds** — do not cache. Fetch fresh on every render.
+          example: "https://s3.amazonaws.com/bucket/id-doc.jpg?X-Amz-Expires=60&..."
+        selfieUrl:
+          type: ["string", "null"]
+          description: |
+            Pre-signed S3 GET URL for the selfie. Valid for exactly **60 seconds**.
+          example: "https://s3.amazonaws.com/bucket/selfie.jpg?X-Amz-Expires=60&..."
+        rejectionReason:
+          type: ["string", "null"]
+          enum: [BLURRY_DOCUMENT, EXPIRED_ID, FACE_MISMATCH, INCOMPLETE_INFO, SUSPECTED_FRAUD, null]
+        reviewerAdminId:
+          type: ["string", "null"]
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    KycDetail:
+      allOf:
+        - $ref: '#/components/schemas/KycQueueItem'
+        - type: object
+          properties:
+            user:
+              description: User platform summary. null if user service is temporarily unavailable.
+              oneOf:
+                - $ref: '#/components/schemas/UserSummary'
+                - type: "null"
+
+    PaginatedKycQueue:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/KycQueueItem'
+        meta:
+          $ref: '#/components/schemas/PaginatedMeta'
+
+    UpdateKycStatusRequest:
+      type: object
+      required: [status]
+      description: |
+        `rejectionReason` is required when status = REJECTED, and must be absent otherwise.
+      properties:
+        status:
+          $ref: '#/components/schemas/AllowedKycTransition'
+        rejectionReason:
+          $ref: '#/components/schemas/KycRejectionReason'
+
+    # ── Transaction ────────────────────────────────────────────────────────────
+
+    TransactionType:
+      type: string
+      enum: [DEPOSIT, WITHDRAWAL, TRANSFER, SWAP, REFUND, FEE, VAS]
+
+    TransactionStatus:
+      type: string
+      enum: [PENDING, CONFIRMED, SUCCESSFUL, FAILED, CANCELLED, REJECTED, ON_HOLD, REVERSED]
+
+    TransactionResponse:
+      type: object
+      required: [id, type, status, userId, amount, asset, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/TransactionType'
+        status:
+          $ref: '#/components/schemas/TransactionStatus'
+        userId:
+          type: string
+          format: uuid
+        amount:
+          type: string
+          description: Decimal string — do not parse as float
+          example: "5000.00"
+        asset:
+          type: string
+          example: NGN
+        fee:
+          type: ["string", "null"]
+          description: Decimal string. null if no fee was applied.
+          example: "50.00"
+        description:
+          type: ["string", "null"]
+        referenceId:
+          type: ["string", "null"]
+          description: Originating service transaction ID (wallet-service or VAS reference)
+        metadata:
+          type: ["object", "null"]
+          additionalProperties: true
+        completedAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PaginatedTransactions:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionResponse'
+        meta:
+          $ref: '#/components/schemas/PaginatedMeta'
+
+    VasActionRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Optional admin-provided reason recorded in transaction metadata
+
+    # ── Finance ────────────────────────────────────────────────────────────────
+
+    WalletType:
+      type: string
+      enum: [HOT, COLD]
+
+    AdjustmentDirection:
+      type: string
+      enum: [CREDIT, DEBIT]
+
+    AdjustmentStatus:
+      type: string
+      enum: [PENDING_APPROVAL, EXECUTED, REJECTED]
+
+    WithdrawalStatus:
+      type: string
+      enum: [PENDING, APPROVED, REJECTED, PROCESSING, COMPLETED]
+
+    WalletBalanceResponse:
+      type: object
+      required: [id, asset, walletType, balance, alertThreshold, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset:
+          type: string
+          example: BTC
+        walletType:
+          $ref: '#/components/schemas/WalletType'
+        balance:
+          type: string
+          description: Decimal string — current balance
+          example: "2.50000000"
+        alertThreshold:
+          type: string
+          description: Decimal string — alert fires when balance drops below this
+          example: "0.10000000"
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateWalletRequest:
+      type: object
+      required: [asset, walletType]
+      properties:
+        asset:
+          type: string
+        walletType:
+          $ref: '#/components/schemas/WalletType'
+        alertThreshold:
+          type: number
+          minimum: 0
+          description: Initial alert threshold (default 0)
+
+    WalletThresholdRequest:
+      type: object
+      required: [asset, threshold]
+      description: |
+        Both `asset` (matching the path parameter) and `threshold` are required in the body.
+      properties:
+        asset:
+          type: string
+        threshold:
+          type: number
+          exclusiveMinimum: 0
+
+    ImmediateAdjustmentResponse:
+      type: object
+      required: [adjustmentId]
+      description: Returned when adjustment amount is below the approval threshold
+      properties:
+        adjustmentId:
+          type: string
+          format: uuid
+
+    PendingAdjustmentResponse:
+      type: object
+      required: [approvalId, adjustmentId]
+      description: Returned when adjustment amount meets or exceeds the approval threshold
+      properties:
+        approvalId:
+          type: string
+          format: uuid
+          description: Pass to approve/reject endpoints
+        adjustmentId:
+          type: string
+          format: uuid
+
+    AdjustmentResponse:
+      type: object
+      required: [id, asset, amount, direction, reason, status, requesterId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset:
+          type: string
+        amount:
+          type: string
+          description: Decimal string
+        direction:
+          $ref: '#/components/schemas/AdjustmentDirection'
+        reason:
+          type: string
+        status:
+          $ref: '#/components/schemas/AdjustmentStatus'
+        requesterId:
+          type: string
+          format: uuid
+        approvalRecordId:
+          type: ["string", "null"]
+          format: uuid
+        executedAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    WithdrawalItem:
+      type: object
+      required: [id, userId, asset, amount, destinationAddress, isHighRisk, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        asset:
+          type: string
+        amount:
+          type: string
+          description: Decimal string
+        destinationAddress:
+          type: string
+        isHighRisk:
+          type: boolean
+          description: true if destination address matched Chainalysis or internal blocklist
+        status:
+          $ref: '#/components/schemas/WithdrawalStatus'
+        rejectionReason:
+          type: ["string", "null"]
+          description: Populated when status is REJECTED
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PaginatedWithdrawals:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/WithdrawalItem'
+        meta:
+          $ref: '#/components/schemas/PaginatedMeta'
+
+    CreateAdjustmentRequest:
+      type: object
+      required: [asset, amount, direction, reason]
+      properties:
+        asset:
+          type: string
+        amount:
+          type: number
+          exclusiveMinimum: 0
+        direction:
+          $ref: '#/components/schemas/AdjustmentDirection'
+        reason:
+          type: string
+          maxLength: 500
+
+    BulkApproveWithdrawalRequest:
+      type: object
+      required: [withdrawalIds]
+      properties:
+        withdrawalIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+          maxItems: 100
+          description: Maximum 100 withdrawal IDs per request
+
+    BulkRejectWithdrawalRequest:
+      type: object
+      required: [withdrawalIds, reason]
+      properties:
+        withdrawalIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+          maxItems: 100
+        reason:
+          type: string
+
+    BulkApproveResult:
+      type: object
+      required: [processed, failed]
+      properties:
+        processed:
+          type: integer
+          description: Number of withdrawals successfully approved
+        failed:
+          type: integer
+          description: Number of withdrawals that could not be approved (already processed, not found, etc.)
+
+    BulkRejectResult:
+      type: object
+      required: [processed]
+      properties:
+        processed:
+          type: integer
+          description: Number of withdrawals successfully rejected
+
+    # ── Pricing schemas ────────────────────────────────────────────────────────
+
+    FeeRuleTypeEnum:
+      type: string
+      enum: [WITHDRAWAL, SWAP, VAS]
+
+    FeeCalculationTypeEnum:
+      type: string
+      enum: [FLAT, PERCENTAGE]
+
+    AssetSpreadResponse:
+      type: object
+      required: [id, assetPair, spread, updatedByAdminId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        assetPair:
+          type: string
+          example: BTC/NGN
+        spread:
+          type: string
+          description: Serialised Decimal — percentage as decimal (e.g. "0.015000" = 1.5%)
+          example: "0.015000"
+        updatedByAdminId:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    FeeRuleResponse:
+      type: object
+      required: [id, type, feeType, amount, tier, asset, isActive, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/FeeRuleTypeEnum'
+        feeType:
+          $ref: '#/components/schemas/FeeCalculationTypeEnum'
+        amount:
+          type: string
+          description: Serialised Decimal — flat NGN amount or percentage decimal
+          example: "150.000000"
+        tier:
+          type: ["string", "null"]
+        asset:
+          type: ["string", "null"]
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AssetResponse:
+      type: object
+      required: [id, asset, enabled, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        asset:
+          type: string
+          example: BTC
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateSpreadRequest:
+      type: object
+      required: [assetPair, spread]
+      properties:
+        assetPair:
+          type: string
+          example: BTC/NGN
+        spread:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Spread as a decimal fraction (e.g. 0.015 = 1.5%)
+          example: 0.015
+
+    UpdateSpreadRequest:
+      type: object
+      required: [spread]
+      properties:
+        spread:
+          type: number
+          minimum: 0
+          maximum: 1
+          example: 0.02
+
+    CreateFeeRuleRequest:
+      type: object
+      required: [type, feeType, amount]
+      properties:
+        type:
+          $ref: '#/components/schemas/FeeRuleTypeEnum'
+        feeType:
+          $ref: '#/components/schemas/FeeCalculationTypeEnum'
+        amount:
+          type: number
+          exclusiveMinimum: 0
+          description: Flat NGN amount or percentage decimal depending on feeType
+          example: 150
+        tier:
+          type: string
+          description: Optional tier label (e.g. "premium")
+        asset:
+          type: string
+          description: Optional asset this rule applies to (e.g. "BTC")
+
+    UpdateFeeRuleRequest:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/FeeRuleTypeEnum'
+        feeType:
+          $ref: '#/components/schemas/FeeCalculationTypeEnum'
+        amount:
+          type: number
+          exclusiveMinimum: 0
+        tier:
+          type: string
+        asset:
+          type: string
+
+    CreateAssetRequest:
+      type: object
+      required: [asset]
+      properties:
+        asset:
+          type: string
+          description: Ticker symbol (e.g. ETH)
+          example: ETH
+
+    ToggleAssetRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+
+    # ── Risk schemas ───────────────────────────────────────────────────────────
+
+    RiskActionEnum:
+      type: string
+      enum: [FLAG, BLOCK, NOTIFY]
+
+    FlagSourceEnum:
+      type: string
+      enum: [RULE, MANUAL]
+
+    RiskRuleResponse:
+      type: object
+      required: [id, conditions, action, description, isDryRun, isActive, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        conditions:
+          type: object
+          description: Arbitrary JSON conditions object evaluated by the risk worker
+          additionalProperties: true
+        action:
+          $ref: '#/components/schemas/RiskActionEnum'
+        description:
+          type: ["string", "null"]
+          maxLength: 500
+        isDryRun:
+          type: boolean
+          description: When true the rule evaluates but takes no action
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    FlaggedTransactionResponse:
+      type: object
+      required: [id, type, status, userId, amount, asset, fee, description, referenceId, metadata, flagged, flagReason, flaggedBy, flaggedAt, completedAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        status:
+          type: string
+        userId:
+          type: string
+          format: uuid
+        amount:
+          type: string
+          description: Serialised Decimal
+        asset:
+          type: string
+        fee:
+          type: ["string", "null"]
+        description:
+          type: ["string", "null"]
+        referenceId:
+          type: ["string", "null"]
+        metadata:
+          type: ["object", "null"]
+          additionalProperties: true
+        flagged:
+          type: boolean
+        flagReason:
+          type: ["string", "null"]
+        flaggedBy:
+          oneOf:
+            - $ref: '#/components/schemas/FlagSourceEnum'
+            - type: "null"
+        flaggedAt:
+          type: ["string", "null"]
+          format: date-time
+        completedAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PaginatedFlaggedTransactions:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlaggedTransactionResponse'
+        meta:
+          type: object
+          required: [nextCursor, total, hasMore]
+          properties:
+            nextCursor:
+              type: ["string", "null"]
+            total:
+              type: integer
+            hasMore:
+              type: boolean
+
+    CreateRiskRuleRequest:
+      type: object
+      required: [conditions, action]
+      properties:
+        conditions:
+          type: object
+          additionalProperties: true
+          description: 'JSON conditions object (e.g. {"amountGte": 1000000, "asset": "NGN"})'
+        action:
+          $ref: '#/components/schemas/RiskActionEnum'
+        description:
+          type: string
+          maxLength: 500
+        isDryRun:
+          type: boolean
+          default: false
+
+    UpdateRiskRuleRequest:
+      type: object
+      properties:
+        conditions:
+          type: object
+          additionalProperties: true
+        action:
+          $ref: '#/components/schemas/RiskActionEnum'
+        description:
+          type: string
+          maxLength: 500
+        isDryRun:
+          type: boolean
+
+    ManualFlagRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+
+    ManualUnflagRequest:
+      type: object
+      required: [justification]
+      properties:
+        justification:
+          type: string
+
+    # ── VAS schemas ────────────────────────────────────────────────────────────
+
+    VasProviderStatusEnum:
+      type: string
+      enum: [ONLINE, DEGRADED, OFFLINE]
+
+    VasCategoryEnum:
+      type: string
+      enum: [AIRTIME, DATA, BILLS, UTILITIES]
+
+    VasProviderResponse:
+      type: object
+      required: [id, name, category, status, balance, isEnabled, lastPingAt, healthCheckUrl, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        category:
+          $ref: '#/components/schemas/VasCategoryEnum'
+        status:
+          $ref: '#/components/schemas/VasProviderStatusEnum'
+        balance:
+          type: string
+          description: Serialised Decimal
+          example: "5000.00"
+        isEnabled:
+          type: boolean
+        lastPingAt:
+          type: ["string", "null"]
+          format: date-time
+        healthCheckUrl:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    VasProductResponse:
+      type: object
+      required: [id, providerId, providerName, name, sku, category, isEnabled, metadata, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          format: uuid
+        providerName:
+          type: string
+        name:
+          type: string
+        sku:
+          type: string
+        category:
+          $ref: '#/components/schemas/VasCategoryEnum'
+        isEnabled:
+          type: boolean
+        metadata:
+          type: ["object", "null"]
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateVasProviderRequest:
+      type: object
+      required: [name, category, healthCheckUrl]
+      properties:
+        name:
+          type: string
+        category:
+          $ref: '#/components/schemas/VasCategoryEnum'
+        healthCheckUrl:
+          type: string
+          format: uri
+        balance:
+          type: number
+          minimum: 0
+          default: 0
+
+    CreateVasProductRequest:
+      type: object
+      required: [providerId, name, sku, category]
+      properties:
+        providerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        sku:
+          type: string
+        category:
+          $ref: '#/components/schemas/VasCategoryEnum'
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ToggleRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+
+    # ── Support schemas ────────────────────────────────────────────────────────
+
+    TicketStatusEnum:
+      type: string
+      enum: [OPEN, IN_PROGRESS, CLOSED]
+
+    BannerTypeEnum:
+      type: string
+      enum: [INFO, WARNING, MAINTENANCE]
+
+    TicketReplyResponse:
+      type: object
+      required: [id, ticketId, adminId, body, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        ticketId:
+          type: string
+          format: uuid
+        adminId:
+          type: string
+          format: uuid
+        body:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    SupportTicketResponse:
+      type: object
+      required: [id, subject, userId, body, status, assignedToAdminId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        subject:
+          type: string
+        userId:
+          type: string
+          format: uuid
+        body:
+          type: string
+        status:
+          $ref: '#/components/schemas/TicketStatusEnum'
+        assignedToAdminId:
+          type: ["string", "null"]
+          format: uuid
+        replies:
+          type: array
+          items:
+            $ref: '#/components/schemas/TicketReplyResponse'
+          description: Populated on GET /support/tickets/{id}; omitted on list responses
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PaginatedTickets:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SupportTicketResponse'
+        meta:
+          type: object
+          required: [nextCursor, total, hasMore]
+          properties:
+            nextCursor:
+              type: ["string", "null"]
+            total:
+              type: integer
+            hasMore:
+              type: boolean
+
+    BannerResponse:
+      type: object
+      required: [id, message, type, expiresAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        message:
+          type: string
+        type:
+          $ref: '#/components/schemas/BannerTypeEnum'
+        expiresAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    EmailTemplateResponse:
+      type: object
+      required: [id, name, subject, body, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        subject:
+          type: string
+        body:
+          type: string
+          description: Handlebars template string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateTicketRequest:
+      type: object
+      required: [subject, userId, body]
+      properties:
+        subject:
+          type: string
+          maxLength: 255
+        userId:
+          type: string
+          format: uuid
+        body:
+          type: string
+
+    ReplyTicketRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+
+    UpdateTicketStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/TicketStatusEnum'
+
+    SendNotificationRequest:
+      type: object
+      required: [userId, title, body]
+      properties:
+        userId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        body:
+          type: string
+
+    CreateBannerRequest:
+      type: object
+      required: [message, type]
+      properties:
+        message:
+          type: string
+        type:
+          $ref: '#/components/schemas/BannerTypeEnum'
+        expiresAt:
+          type: string
+          format: date-time
+          description: Optional banner expiry. Null means the banner never expires.
+
+    UpdateBannerRequest:
+      type: object
+      properties:
+        message:
+          type: string
+        type:
+          $ref: '#/components/schemas/BannerTypeEnum'
+        expiresAt:
+          type: string
+          format: date-time
+
+    CreateTemplateRequest:
+      type: object
+      required: [name, subject, body]
+      properties:
+        name:
+          type: string
+          description: Unique template identifier
+        subject:
+          type: string
+        body:
+          type: string
+          description: Handlebars template string — syntax is validated before saving
+
+    UpdateTemplateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        subject:
+          type: string
+        body:
+          type: string
+          description: Handlebars template string — syntax is validated before saving
+
+    # ── Analytics schemas ──────────────────────────────────────────────────────
+
+    AnalyticsPeriodEnum:
+      type: string
+      enum: [DAILY, WEEKLY, MONTHLY]
+
+    ReportTypeEnum:
+      type: string
+      enum: [REVENUE, VOLUME, KYC, VASP]
+
+    PdfReportStatusEnum:
+      type: string
+      enum: [QUEUED, PROCESSING, COMPLETE, FAILED]
+
+    AnalyticsOverview:
+      type: object
+      required: [dataDate, dau, revenue, totalVolume]
+      properties:
+        dataDate:
+          type: string
+          format: date
+          description: ISO-8601 date of the most recent aggregation
+        dau:
+          type: integer
+          description: Daily active users
+        revenue:
+          type: string
+          description: Serialised Decimal — total fee revenue for the day
+          example: "48250.00"
+        totalVolume:
+          type: string
+          description: Serialised Decimal — total transaction volume for the day
+          example: "1250000.00"
+
+    DataPoint:
+      type: object
+      required: [date, value]
+      properties:
+        date:
+          type: string
+          format: date
+        value:
+          description: Count or amount depending on metric type
+          oneOf:
+            - type: integer
+            - type: string
+
+    VolumeDataPoint:
+      type: object
+      required: [date, swap, withdrawal, funding]
+      properties:
+        date:
+          type: string
+          format: date
+        swap:
+          type: string
+          description: Serialised Decimal
+        withdrawal:
+          type: string
+          description: Serialised Decimal
+        funding:
+          type: string
+          description: Serialised Decimal
+
+    RevenueDataPoint:
+      type: object
+      required: [date, total, byType]
+      properties:
+        date:
+          type: string
+          format: date
+        total:
+          type: string
+          description: Serialised Decimal — sum across all transaction types
+        byType:
+          type: object
+          additionalProperties:
+            type: string
+          description: Revenue broken down by transaction type key
+
+    KycFunnelData:
+      type: object
+      required: [submitted, approved, rejected, pending, conversionRate]
+      properties:
+        submitted:
+          type: integer
+        approved:
+          type: integer
+        rejected:
+          type: integer
+        pending:
+          type: integer
+        conversionRate:
+          type: string
+          description: Serialised Decimal — approved / submitted as a percentage string
+          example: "72.50"
+
+    VaspMonitoringData:
+      type: object
+      required: [dataDate, totalVolume, thresholdNgn, thresholdBreached, breakdown]
+      properties:
+        dataDate:
+          type: string
+          format: date
+        totalVolume:
+          type: string
+          description: Serialised Decimal — total NGN-equivalent volume
+        thresholdNgn:
+          type: string
+          description: Serialised Decimal — regulatory volume threshold in NGN
+        thresholdBreached:
+          type: boolean
+          description: true when totalVolume >= thresholdNgn
+        breakdown:
+          type: object
+          additionalProperties:
+            type: string
+          description: Per-asset volume breakdown (asset ticker → NGN-equivalent string)
+
+    PdfReportStatusResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/PdfReportStatusEnum'
+        downloadUrl:
+          type: string
+          format: uri
+          description: Pre-signed S3 URL valid for 15 minutes. Present only when status = COMPLETE. Do not cache.
+
+    AuditLogEntry:
+      type: object
+      required: [id, adminId, action, entityType, entityId, ipAddress, metadata, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        adminId:
+          type: string
+          format: uuid
+        action:
+          type: string
+          description: Machine-readable action string (e.g. UPDATE_USER_STATUS)
+        entityType:
+          type: string
+          description: Entity being acted on (e.g. User, KycSubmission)
+        entityId:
+          type: ["string", "null"]
+          description: ID of the entity being acted on
+        ipAddress:
+          type: string
+        metadata:
+          type: ["object", "null"]
+          additionalProperties: true
+          description: Additional context recorded at the time of the action
+        createdAt:
+          type: string
+          format: date-time
+
+    PaginatedAuditLog:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLogEntry'
+        meta:
+          type: object
+          required: [nextCursor, total, hasMore]
+          properties:
+            nextCursor:
+              type: ["string", "null"]
+            total:
+              type: integer
+            hasMore:
+              type: boolean
+
+    EnqueueReportRequest:
+      type: object
+      required: [reportType]
+      properties:
+        reportType:
+          $ref: '#/components/schemas/ReportTypeEnum'
+        filters:
+          type: object
+          additionalProperties: true
+          description: |
+            Optional filters — keys depend on reportType:
+            - REVENUE/VOLUME: `period` (DAILY|WEEKLY|MONTHLY), `from` (ISO-8601), `to` (ISO-8601)
+            - KYC: `status` (KYC status enum), `from`, `to`
+            - VASP: no filters

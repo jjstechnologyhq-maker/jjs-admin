@@ -1,108 +1,84 @@
 /**
- * Analytics & Reporting API module
- * PRD §7 — Analytics & Reporting
+ * Analytics API — overview metrics, time-series, KYC funnel, VASP monitoring,
+ * PDF reports, and the admin audit log.
+ * See openapi-admin.yaml › Analytics.
  */
 
 import { apiClient } from "./client";
+import { cleanParams, type Paginated } from "./types";
+import type {
+  AnalyticsOverview,
+  DataPoint,
+  VolumeDataPoint,
+  RevenueDataPoint,
+  KycFunnelData,
+  VaspMonitoringData,
+  PdfReportStatusResponse,
+  EnqueueReportRequest,
+  AuditLogEntry,
+  PaginatedAuditLog,
+  AnalyticsPeriodEnum,
+} from "./schema";
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface DauMetrics {
-  date: string;
-  count: number;
+export interface RangeParams {
+  period: AnalyticsPeriodEnum;
+  from: string;
+  to: string;
 }
 
-export interface VolumeMetrics {
-  period: string;
-  totalSwapped: number;
-  totalWithdrawn: number;
-  totalFunded: number;
-  currency: string;
+export interface AuditLogParams {
+  adminId?: string;
+  action?: string;
+  entityType?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  cursor?: string;
+  limit?: number;
 }
-
-export interface RevenueMetrics {
-  period: string;
-  swapFees: number;
-  withdrawalFees: number;
-  vasFees: number;
-  totalRevenue: number;
-  currency: string;
-}
-
-export interface KycConversionMetrics {
-  totalRegistered: number;
-  kycStarted: number;
-  kycCompleted: number;
-  kycApproved: number;
-  conversionRate: number;
-}
-
-export interface DashboardSummary {
-  totalUsers: number;
-  activeUsers24h: number;
-  pendingKyc: number;
-  pendingWithdrawals: number;
-  totalVolume24h: number;
-  totalRevenue24h: number;
-  systemHealth: "HEALTHY" | "DEGRADED" | "DOWN";
-}
-
-export type TimeRange = "24h" | "7d" | "30d" | "90d" | "1y";
-
-// ── API methods ──────────────────────────────────────────────────────────────
 
 export const analyticsApi = {
-  /** Fetch dashboard summary KPIs */
-  getDashboardSummary: async (): Promise<DashboardSummary> => {
-    const response = await apiClient.get<DashboardSummary>(
-      "/analytics/dashboard"
-    );
-    return response.data;
+  overview: async (): Promise<AnalyticsOverview> => {
+    const res = await apiClient.get<AnalyticsOverview>("/analytics/overview");
+    return res.data;
   },
 
-  /** Fetch DAU metrics over a time range */
-  getDau: async (range: TimeRange): Promise<DauMetrics[]> => {
-    const response = await apiClient.get<DauMetrics[]>("/analytics/dau", {
-      params: { range },
+  users: async (params: RangeParams): Promise<DataPoint[]> => {
+    const res = await apiClient.get<{ data: DataPoint[] }>("/analytics/users", { params });
+    return res.data.data;
+  },
+  volumes: async (params: RangeParams): Promise<VolumeDataPoint[]> => {
+    const res = await apiClient.get<{ data: VolumeDataPoint[] }>("/analytics/volumes", { params });
+    return res.data.data;
+  },
+  revenue: async (params: RangeParams): Promise<RevenueDataPoint[]> => {
+    const res = await apiClient.get<{ data: RevenueDataPoint[] }>("/analytics/revenue", { params });
+    return res.data.data;
+  },
+
+  kycFunnel: async (params: { from: string; to: string }): Promise<KycFunnelData> => {
+    const res = await apiClient.get<KycFunnelData>("/analytics/kyc-funnel", { params });
+    return res.data;
+  },
+  vasp: async (): Promise<VaspMonitoringData> => {
+    const res = await apiClient.get<VaspMonitoringData>("/analytics/vasp");
+    return res.data;
+  },
+
+  // ── PDF reports (async job) ──────────────────────────────────────────────
+  enqueueReport: async (body: EnqueueReportRequest): Promise<{ jobId: string }> => {
+    const res = await apiClient.post<{ jobId: string }>("/analytics/reports", body);
+    return res.data;
+  },
+  reportStatus: async (jobId: string): Promise<PdfReportStatusResponse> => {
+    const res = await apiClient.get<PdfReportStatusResponse>(`/analytics/reports/${jobId}`);
+    return res.data;
+  },
+
+  // ── Audit log (SUPER_ADMIN) ──────────────────────────────────────────────
+  auditLog: async (params: AuditLogParams = {}): Promise<Paginated<AuditLogEntry>> => {
+    const res = await apiClient.get<PaginatedAuditLog>("/analytics/audit-log", {
+      params: cleanParams(params),
     });
-    return response.data;
-  },
-
-  /** Fetch volume metrics */
-  getVolume: async (range: TimeRange): Promise<VolumeMetrics[]> => {
-    const response = await apiClient.get<VolumeMetrics[]>(
-      "/analytics/volume",
-      { params: { range } }
-    );
-    return response.data;
-  },
-
-  /** Fetch revenue metrics */
-  getRevenue: async (range: TimeRange): Promise<RevenueMetrics[]> => {
-    const response = await apiClient.get<RevenueMetrics[]>(
-      "/analytics/revenue",
-      { params: { range } }
-    );
-    return response.data;
-  },
-
-  /** Fetch KYC funnel conversion */
-  getKycConversion: async (): Promise<KycConversionMetrics> => {
-    const response = await apiClient.get<KycConversionMetrics>(
-      "/analytics/kyc-conversion"
-    );
-    return response.data;
-  },
-
-  /** Trigger server-side PDF report generation */
-  generateReport: async (
-    type: string,
-    range: TimeRange
-  ): Promise<{ downloadUrl: string }> => {
-    const response = await apiClient.post<{ downloadUrl: string }>(
-      "/analytics/reports",
-      { type, range }
-    );
-    return response.data;
+    return res.data as Paginated<AuditLogEntry>;
   },
 };

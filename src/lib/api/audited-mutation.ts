@@ -1,48 +1,20 @@
 /**
- * auditedMutation — single wrapper for all data-changing API calls
- * PRD §4.5 — Build once on day one, never retrofit into 20 places.
+ * auditedMutation — passthrough wrapper for data-changing API calls.
  *
- * Every mutation that changes data passes through this wrapper,
- * which automatically posts to the audit log endpoint.
- */
-
-import { auditApi } from "@/api/audit";
-
-/**
- * Wrap any data-changing operation with automatic audit logging.
+ * The JJS Admin Service records an audit-log entry server-side for every
+ * mutating admin action (surfaced read-only via GET /analytics/audit-log).
+ * The client therefore does NOT write audit entries; this wrapper stays as a
+ * thin passthrough so `useAuditedMutation`'s invalidation/toast ergonomics work
+ * without a nonexistent client-side audit endpoint.
  *
- * @param action - Human-readable action description (e.g. "approve_kyc", "adjust_fee")
- * @param fn - The async mutation function to execute
- * @param details - Optional additional context for the audit log
- * @returns The result of the mutation function
- *
- * @example
- * ```ts
- * const result = await auditedMutation(
- *   'approve_withdrawal',
- *   () => withdrawalApi.approve(id),
- *   { withdrawalId: id, amount }
- * );
- * ```
+ * @param _action - Human-readable action name (kept for call-site clarity).
+ * @param fn - The async mutation to execute.
+ * @param _details - Optional context (unused client-side).
  */
 export async function auditedMutation<T>(
-  action: string,
+  _action: string,
   fn: () => Promise<T>,
-  details?: Record<string, unknown>
+  _details?: Record<string, unknown>,
 ): Promise<T> {
-  const result = await fn();
-
-  // Fire-and-forget audit log — don't block the user on audit writes
-  auditApi
-    .log({
-      action,
-      timestamp: Date.now(),
-      details,
-    })
-    .catch((err) => {
-      // Log audit failure but don't fail the operation
-      console.error("[Audit] Failed to log action:", action, err);
-    });
-
-  return result;
+  return fn();
 }

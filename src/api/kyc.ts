@@ -1,102 +1,62 @@
 /**
- * KYC API module
- * PRD §6.2 — KYC Verification Queue, User Detail View
+ * KYC API — review queue and submission status changes.
+ * See openapi-admin.yaml › KYC.
+ *
+ * Document URLs (idDocumentUrl, selfieUrl) are pre-signed S3 URLs with a
+ * 60-second TTL — never cache them; fetch fresh on every render.
  */
 
 import { apiClient } from "./client";
+import { cleanParams, type Paginated } from "./types";
 import type {
-  PaginatedResponse,
-  PaginationParams,
-  KycStatus,
-  AccountStatus,
-  RiskLevel,
-} from "./types";
+  KycQueueItem,
+  KycDetail,
+  PaginatedKycQueue,
+  UpdateKycStatusRequest,
+  KycQueueStatusFilter,
+  KycRejectionReason,
+} from "./schema";
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-export interface KycSubmission {
-  id: string;
-  userId: string;
-  userName: string;
-  email: string;
-  status: KycStatus;
-  documentType: string;
-  documentUrl: string;
-  selfieUrl: string;
-  submittedAt: string;
-  reviewedAt?: string;
-  reviewedBy?: string;
-  rejectionReason?: string;
-  riskLevel: RiskLevel;
-}
-
-export interface KycDetail extends KycSubmission {
-  user: {
-    id: string;
-    fullName: string;
-    email: string;
-    phone: string;
-    accountStatus: AccountStatus;
-    createdAt: string;
-    country: string;
-    dateOfBirth: string;
-  };
-  documents: {
-    id: string;
-    type: string;
-    url: string;
-    uploadedAt: string;
-  }[];
-}
-
-export interface KycStatusUpdate {
-  status: KycStatus;
-  rejectionReason?: string;
-}
-
-export type KycQueueParams = PaginationParams & {
-  status?: KycStatus;
-  riskLevel?: RiskLevel;
-};
-
-// ── Rejection reason codes ───────────────────────────────────────────────────
-
-export const KYC_REJECTION_REASONS = [
-  { code: "BLURRY_DOCUMENT", label: "Blurry Document" },
+export const KYC_REJECTION_REASONS: { code: KycRejectionReason; label: string }[] = [
+  { code: "BLURRY_DOCUMENT", label: "Blurry document" },
   { code: "EXPIRED_ID", label: "Expired ID" },
-  { code: "MISMATCH", label: "Name/Photo Mismatch" },
-  { code: "INCOMPLETE", label: "Incomplete Documentation" },
-  { code: "SUSPECTED_FRAUD", label: "Suspected Fraud" },
-  { code: "UNDERAGE", label: "Under Minimum Age" },
-  { code: "OTHER", label: "Other" },
-] as const;
+  { code: "FACE_MISMATCH", label: "Face mismatch" },
+  { code: "INCOMPLETE_INFO", label: "Incomplete info" },
+  { code: "SUSPECTED_FRAUD", label: "Suspected fraud" },
+];
 
-// ── API methods ──────────────────────────────────────────────────────────────
+export interface KycQueueParams {
+  status?: KycQueueStatusFilter[];
+  cursor?: string;
+  limit?: number;
+}
 
 export const kycApi = {
-  /** Fetch the KYC verification queue with filters */
-  getQueue: async (
-    params?: KycQueueParams
-  ): Promise<PaginatedResponse<KycSubmission>> => {
-    const response = await apiClient.get<PaginatedResponse<KycSubmission>>(
-      "/kyc/queue",
-      { params }
-    );
-    return response.data;
+  /** GET /kyc/queue — cursor-paginated queue (defaults to PENDING + INFO_REQUIRED). */
+  getQueue: async (params: KycQueueParams = {}): Promise<Paginated<KycQueueItem>> => {
+    const res = await apiClient.get<PaginatedKycQueue>("/kyc/queue", {
+      params: cleanParams(params),
+      // Serialise `status` as repeated keys (style: form, explode: true).
+      paramsSerializer: { indexes: null },
+    });
+    return res.data as Paginated<KycQueueItem>;
   },
 
-  /** Fetch detailed KYC submission with user info and all documents */
+  /** GET /kyc/{userId} — full submission detail + user summary. */
   getDetail: async (userId: string): Promise<KycDetail> => {
-    const response = await apiClient.get<KycDetail>(`/kyc/${userId}`);
-    return response.data;
+    const res = await apiClient.get<KycDetail>(`/kyc/${userId}`);
+    return res.data;
   },
 
-  /** Update KYC verification status (approve/reject) */
+  /**
+   * PATCH /kyc/{userId} — APPROVED | REJECTED | INFO_REQUIRED.
+   * `rejectionReason` is required iff status = REJECTED.
+   */
   updateStatus: async (
     userId: string,
-    update: KycStatusUpdate
-  ): Promise<{ success: boolean }> => {
-    const response = await apiClient.patch(`/kyc/${userId}/status`, update);
-    return response.data;
+    body: UpdateKycStatusRequest,
+  ): Promise<KycQueueItem> => {
+    const res = await apiClient.patch<KycQueueItem>(`/kyc/${userId}`, body);
+    return res.data;
   },
 };

@@ -1,60 +1,45 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft,
   CheckCircle2,
   XCircle,
-  Clock,
   Info,
-  AlertTriangle,
   User,
   Mail,
   Phone,
-  MapPin,
-  Calendar,
-  Shield,
+  RefreshCw,
   Loader2,
 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
+import {
+  StatusBadge,
+  KYC_STATUS,
+  USER_ACCOUNT_STATUS,
+} from "@/components/status-badge";
 import { kycApi, KYC_REJECTION_REASONS } from "@/api/kyc";
-import type { KycStatus, RiskLevel } from "@/api/types";
+import type { KycRejectionReason } from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
-import { useState } from "react";
-
-// ── Badge configs ────────────────────────────────────────────────────────────
-
-const STATUS_CONFIG: Record<KycStatus, { label: string; icon: React.ComponentType<{ className?: string }>; className: string }> = {
-  PENDING: { label: "Pending Review", icon: Clock, className: "bg-amber-500/10 text-amber-600 border-amber-500/20 dark:text-amber-400" },
-  APPROVED: { label: "Approved", icon: CheckCircle2, className: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20 dark:text-emerald-400" },
-  REJECTED: { label: "Rejected", icon: XCircle, className: "bg-red-500/10 text-red-600 border-red-500/20 dark:text-red-400" },
-  INFO_REQUIRED: { label: "Info Required", icon: Info, className: "bg-blue-500/10 text-blue-600 border-blue-500/20 dark:text-blue-400" },
-};
-
-const RISK_CONFIG: Record<RiskLevel, { label: string; className: string }> = {
-  LOW: { label: "Low Risk", className: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" },
-  MEDIUM: { label: "Medium Risk", className: "bg-amber-500/10 text-amber-600 border-amber-500/20" },
-  HIGH: { label: "High Risk", className: "bg-orange-500/10 text-orange-600 border-orange-500/20" },
-  CRITICAL: { label: "Critical Risk", className: "bg-red-500/10 text-red-600 border-red-500/20" },
-};
-
-// ── Component ────────────────────────────────────────────────────────────────
 
 export default function KycDetailPage({
   params,
@@ -63,48 +48,50 @@ export default function KycDetailPage({
 }) {
   const { userId } = use(params);
   const router = useRouter();
-  const [rejectionReason, setRejectionReason] = useState("");
+  const [rejectionReason, setRejectionReason] = useState<KycRejectionReason | "">("");
 
-  const { data: detail, isLoading } = useQuery({
+  const {
+    data: detail,
+    isLoading,
+    isFetching,
+    refetch,
+  } = useQuery({
     queryKey: ["kyc", "detail", userId],
     queryFn: () => kycApi.getDetail(userId),
+    // Pre-signed doc URLs live 60s — don't serve stale ones from cache.
+    staleTime: 0,
+    gcTime: 0,
   });
 
-  const approveMutation = useAuditedMutation({
+  const invalidate = [["kyc", "queue"], ["kyc", "detail", userId]] as const;
+
+  const approve = useAuditedMutation({
     action: "approve_kyc",
     mutationFn: () => kycApi.updateStatus(userId, { status: "APPROVED" }),
-    invalidateKeys: [["kyc", "queue"], ["kyc", "detail", userId]],
-    successMessage: "KYC approved successfully",
-    auditDetails: () => ({ userId }),
+    invalidateKeys: [...invalidate],
+    successMessage: "KYC approved",
   });
-
-  const rejectMutation = useAuditedMutation({
+  const requestInfo = useAuditedMutation({
+    action: "request_kyc_info",
+    mutationFn: () => kycApi.updateStatus(userId, { status: "INFO_REQUIRED" }),
+    invalidateKeys: [...invalidate],
+    successMessage: "Information requested from user",
+  });
+  const reject = useAuditedMutation({
     action: "reject_kyc",
     mutationFn: () =>
       kycApi.updateStatus(userId, {
         status: "REJECTED",
-        rejectionReason: rejectionReason || undefined,
+        rejectionReason: rejectionReason as KycRejectionReason,
       }),
-    invalidateKeys: [["kyc", "queue"], ["kyc", "detail", userId]],
+    invalidateKeys: [...invalidate],
     successMessage: "KYC rejected",
-    auditDetails: () => ({ userId, rejectionReason }),
-  });
-
-  const requestInfoMutation = useAuditedMutation({
-    action: "request_kyc_info",
-    mutationFn: () => kycApi.updateStatus(userId, { status: "INFO_REQUIRED" }),
-    invalidateKeys: [["kyc", "queue"], ["kyc", "detail", userId]],
-    successMessage: "Information requested from user",
-    auditDetails: () => ({ userId }),
   });
 
   if (isLoading) {
     return (
       <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
-        <div className="flex items-center gap-3">
-          <Skeleton className="h-10 w-10 rounded-lg" />
-          <Skeleton className="h-6 w-48" />
-        </div>
+        <Skeleton className="h-8 w-64" />
         <div className="grid gap-6 lg:grid-cols-2">
           <Skeleton className="h-[400px] rounded-lg" />
           <Skeleton className="h-[400px] rounded-lg" />
@@ -121,14 +108,11 @@ export default function KycDetailPage({
     );
   }
 
-  const statusConfig = STATUS_CONFIG[detail.status];
-  const StatusIcon = statusConfig.icon;
-  const riskConfig = RISK_CONFIG[detail.riskLevel];
-  const isPending = detail.status === "PENDING";
+  const canAct = detail.status === "PENDING" || detail.status === "INFO_REQUIRED";
+  const busy = approve.isPending || reject.isPending || requestInfo.isPending;
 
   return (
     <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
-      {/* Back + Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" onClick={() => router.push("/kyc")}>
@@ -136,227 +120,138 @@ export default function KycDetailPage({
           </Button>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-semibold tracking-tight">{detail.userName}</h1>
-              <Badge variant="outline" className={`gap-1 ${statusConfig.className}`}>
-                <StatusIcon className="size-3" />
-                {statusConfig.label}
-              </Badge>
+              <h1 className="text-xl font-semibold tracking-tight">
+                {detail.user?.fullName ?? "KYC submission"}
+              </h1>
+              <StatusBadge value={detail.status} config={KYC_STATUS} />
             </div>
-            <p className="text-sm text-muted-foreground">{detail.email}</p>
+            <p className="font-mono text-xs text-muted-foreground">{detail.userId}</p>
           </div>
         </div>
-
-        {/* Risk badge */}
-        <Badge variant="outline" className={`${riskConfig.className} gap-1`}>
-          {(detail.riskLevel === "HIGH" || detail.riskLevel === "CRITICAL") && (
-            <AlertTriangle className="size-3" />
-          )}
-          {riskConfig.label}
-        </Badge>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => refetch()}
+          disabled={isFetching}
+        >
+          <RefreshCw className={`mr-2 size-4 ${isFetching ? "animate-spin" : ""}`} />
+          Refresh documents
+        </Button>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        {/* Left: Document Viewer */}
         <div className="flex flex-col gap-4">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Identity Document</CardTitle>
-              <CardDescription>{detail.documentType}</CardDescription>
+              <CardDescription>Pre-signed URL — expires 60s after load</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="overflow-hidden rounded-lg border bg-muted/30">
-                <img
-                  src={detail.documentUrl}
-                  alt={`${detail.documentType} for ${detail.userName}`}
-                  className="h-auto w-full object-contain"
-                />
-              </div>
+              <DocImage url={detail.idDocumentUrl} alt="ID document" />
             </CardContent>
           </Card>
-
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Liveness Selfie</CardTitle>
-              <CardDescription>Photo verification</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="overflow-hidden rounded-lg border bg-muted/30">
-                <img
-                  src={detail.selfieUrl}
-                  alt={`Selfie for ${detail.userName}`}
-                  className="mx-auto h-auto max-h-[300px] object-contain"
-                />
-              </div>
+              <DocImage url={detail.selfieUrl} alt="Selfie" />
             </CardContent>
           </Card>
         </div>
 
-        {/* Right: User Info + Actions */}
         <div className="flex flex-col gap-4">
-          {/* User info card */}
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Applicant Information</CardTitle>
+              <CardTitle className="text-base">Applicant</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3">
-              <InfoRow icon={User} label="Full Name" value={detail.user.fullName} />
-              <InfoRow icon={Mail} label="Email" value={detail.user.email} />
-              <InfoRow icon={Phone} label="Phone" value={detail.user.phone} />
-              <InfoRow icon={MapPin} label="Country" value={detail.user.country} />
-              <InfoRow
-                icon={Calendar}
-                label="Date of Birth"
-                value={new Date(detail.user.dateOfBirth).toLocaleDateString("en-GB", {
-                  day: "numeric",
-                  month: "long",
-                  year: "numeric",
-                })}
-              />
-              <InfoRow
-                icon={Shield}
-                label="Account Status"
-                value={detail.user.accountStatus}
-              />
-              <InfoRow
-                icon={Calendar}
-                label="Member Since"
-                value={new Date(detail.user.createdAt).toLocaleDateString("en-GB", {
-                  day: "numeric",
-                  month: "short",
-                  year: "numeric",
-                })}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Submission info */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Submission Details</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3 text-sm">
-              <div className="flex justify-between">
+              {detail.user ? (
+                <>
+                  <InfoRow icon={User} label="Full name" value={detail.user.fullName} />
+                  <InfoRow icon={Mail} label="Email" value={detail.user.email} />
+                  <InfoRow icon={Phone} label="Phone" value={detail.user.phone} />
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Account</span>
+                    <StatusBadge
+                      value={detail.user.accountStatus}
+                      config={USER_ACCOUNT_STATUS}
+                    />
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  User platform is temporarily unavailable.
+                </p>
+              )}
+              <Separator />
+              <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Submitted</span>
-                <span>
-                  {new Date(detail.submittedAt).toLocaleString("en-GB", {
-                    day: "numeric",
-                    month: "short",
-                    year: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </span>
+                <span>{new Date(detail.createdAt).toLocaleString("en-GB")}</span>
               </div>
-              {detail.reviewedAt && (
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Reviewed</span>
-                  <span>
-                    {new Date(detail.reviewedAt).toLocaleString("en-GB", {
-                      day: "numeric",
-                      month: "short",
-                      year: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
+              {detail.rejectionReason && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Rejection reason</span>
+                  <span className="font-medium">
+                    {KYC_REJECTION_REASONS.find((r) => r.code === detail.rejectionReason)?.label ??
+                      detail.rejectionReason}
                   </span>
                 </div>
               )}
-              {detail.reviewedBy && (
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Reviewed By</span>
-                  <span>{detail.reviewedBy}</span>
-                </div>
-              )}
-              {detail.rejectionReason && (
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Rejection Reason</span>
-                  <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">
-                    {KYC_REJECTION_REASONS.find((r) => r.code === detail.rejectionReason)?.label ??
-                      detail.rejectionReason}
-                  </Badge>
-                </div>
-              )}
             </CardContent>
           </Card>
 
-          {/* Actions */}
-          {isPending && (
+          {canAct && (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">Verification Actions</CardTitle>
-                <CardDescription>
-                  Review the documents above and take action
-                </CardDescription>
+                <CardTitle className="text-base">Review actions</CardTitle>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
-                {/* Rejection reason selector */}
                 <div className="flex flex-col gap-2">
-                  <label className="text-sm font-medium">
-                    Rejection Reason (if rejecting)
-                  </label>
+                  <label className="text-sm font-medium">Rejection reason (if rejecting)</label>
                   <Select
                     value={rejectionReason}
-                    onValueChange={(v) => setRejectionReason(v ?? "")}
-                    items={KYC_REJECTION_REASONS.map((r) => ({
-                      label: r.label,
-                      value: r.code,
-                    }))}
+                    onValueChange={(v) => setRejectionReason(v as KycRejectionReason)}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Select a reason..." />
+                      <SelectValue placeholder="Select a reason…" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectGroup>
-                        {KYC_REJECTION_REASONS.map((reason) => (
-                          <SelectItem key={reason.code} value={reason.code}>
-                            {reason.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
+                      {KYC_REJECTION_REASONS.map((r) => (
+                        <SelectItem key={r.code} value={r.code}>
+                          {r.label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
-
                 <Separator />
-
                 <div className="flex flex-col gap-2 sm:flex-row">
                   <Button
                     className="flex-1 gap-2"
-                    onClick={() => approveMutation.mutate()}
-                    disabled={approveMutation.isPending}
+                    onClick={() => approve.mutate()}
+                    disabled={busy}
                   >
-                    {approveMutation.isPending ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="size-4" />
-                    )}
+                    {approve.isPending ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
                     Approve
                   </Button>
                   <Button
                     variant="destructive"
                     className="flex-1 gap-2"
-                    onClick={() => rejectMutation.mutate()}
-                    disabled={rejectMutation.isPending || !rejectionReason}
+                    onClick={() => reject.mutate()}
+                    disabled={busy || !rejectionReason}
                   >
-                    {rejectMutation.isPending ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <XCircle className="size-4" />
-                    )}
+                    {reject.isPending ? <Loader2 className="size-4 animate-spin" /> : <XCircle className="size-4" />}
                     Reject
                   </Button>
                   <Button
                     variant="outline"
                     className="flex-1 gap-2"
-                    onClick={() => requestInfoMutation.mutate()}
-                    disabled={requestInfoMutation.isPending}
+                    onClick={() => requestInfo.mutate()}
+                    disabled={busy}
                   >
-                    {requestInfoMutation.isPending ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Info className="size-4" />
-                    )}
-                    Request Info
+                    {requestInfo.isPending ? <Loader2 className="size-4 animate-spin" /> : <Info className="size-4" />}
+                    Request info
                   </Button>
                 </div>
               </CardContent>
@@ -364,6 +259,22 @@ export default function KycDetailPage({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function DocImage({ url, alt }: { url?: string | null; alt: string }) {
+  if (!url) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-lg border bg-muted/30 text-sm text-muted-foreground">
+        No document available
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-hidden rounded-lg border bg-muted/30">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={url} alt={alt} className="mx-auto h-auto max-h-[320px] object-contain" />
     </div>
   );
 }

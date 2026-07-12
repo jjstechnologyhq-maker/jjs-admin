@@ -1,31 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
-import {
-  flexRender,
-  getCoreRowModel,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
-  useReactTable,
-  type ColumnDef,
-  type ColumnFiltersState,
-  type SortingState,
-} from "@tanstack/react-table";
 import {
   ShieldCheck,
-  Search,
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  ChevronsLeftIcon,
-  ChevronsRightIcon,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  UserPlus,
-  Ban,
   ShieldAlert,
+  UserPlus,
   MoreHorizontal,
   Mail,
   Loader2,
@@ -35,10 +14,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -69,249 +48,37 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-
-import { adminApi, type AdminUser } from "@/api/admin";
-import type { InvitationStatus } from "@/api/types";
-import type { Role } from "@/lib/auth/types";
+import { StatusBadge, ADMIN_STATUS } from "@/components/status-badge";
+import { CursorPagination } from "@/components/cursor-pagination";
+import { useCursorList } from "@/hooks/use-cursor-list";
+import { adminApi } from "@/api/admin";
+import type { AdminProfile, AdminRole, AdminStatus } from "@/api/schema";
+import { useAuthStore } from "@/stores/auth-store";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
 
-// ── Status badge config ──────────────────────────────────────────────────────
-
-const STATUS_CONFIG: Record<
-  InvitationStatus,
-  {
-    label: string;
-    icon: React.ComponentType<{ className?: string }>;
-    className: string;
-  }
-> = {
-  ACTIVE: {
-    label: "Active",
-    icon: CheckCircle2,
-    className: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20",
-  },
-  PENDING: {
-    label: "Pending Invite",
-    icon: Clock,
-    className: "bg-amber-500/10 text-amber-600 border-amber-500/20",
-  },
-  EXPIRED: {
-    label: "Expired",
-    icon: XCircle,
-    className: "bg-muted text-muted-foreground border-border",
-  },
-};
-
-const ROLE_COLORS: Record<string, string> = {
-  SUPER_ADMIN: "bg-red-500/10 text-red-500 border-red-500/20",
-  COMPLIANCE_OFFICER: "bg-blue-500/10 text-blue-500 border-blue-500/20",
-  FINANCE_MANAGER: "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
-  CUSTOMER_SUPPORT: "bg-amber-500/10 text-amber-500 border-amber-500/20",
-};
-
-// ── Main component ───────────────────────────────────────────────────────────
+const ROLES: AdminRole[] = [
+  "SUPER_ADMIN",
+  "COMPLIANCE_OFFICER",
+  "FINANCE_MANAGER",
+  "CUSTOMER_SUPPORT",
+];
+const STATUS_TABS: (AdminStatus | "ALL")[] = [
+  "ALL",
+  "ACTIVE",
+  "PENDING",
+  "SUSPENDED",
+  "DEACTIVATED",
+];
 
 export default function AdminManagementPage() {
-  const [statusFilter, setStatusFilter] = React.useState<string>("ALL");
-  const [searchQuery, setSearchQuery] = React.useState("");
-  const [sorting, setSorting] = React.useState<SortingState>([]);
-  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>(
-    [],
-  );
-  const [pagination, setPagination] = React.useState({
-    pageIndex: 0,
-    pageSize: 10,
-  });
+  const [status, setStatus] = React.useState<AdminStatus | "ALL">("ALL");
 
-  const [inviteOpen, setInviteOpen] = React.useState(false);
-  const [inviteEmail, setInviteEmail] = React.useState("");
-  const [inviteRole, setInviteRole] = React.useState("CUSTOMER_SUPPORT");
-
-  const { data, isLoading } = useQuery({
-    queryKey: [
-      "admins",
-      "list",
-      statusFilter,
-      pagination.pageIndex,
-      pagination.pageSize,
-    ],
-    queryFn: () =>
-      adminApi.getAdmins({
-        status:
-          statusFilter === "ALL"
-            ? undefined
-            : (statusFilter as InvitationStatus),
-        page: pagination.pageIndex + 1,
-        limit: pagination.pageSize,
-      }),
-  });
-
-  const inviteMutation = useAuditedMutation({
-    action: "invite_admin",
-    mutationFn: () =>
-      adminApi.invite({
-        email: inviteEmail,
-        permissions: [inviteRole as Role],
-        fullName: "Invited Admin",
-      }),
-    invalidateKeys: [["admins", "list"]],
-    successMessage: "Invitation sent successfully",
-    onSuccess: () => {
-      setInviteOpen(false);
-      setInviteEmail("");
-      setInviteRole("CUSTOMER_SUPPORT");
-    },
-  });
-
-  const suspendMutation = useAuditedMutation({
-    action: "suspend_admin",
-    mutationFn: (id: string) => adminApi.suspend(id),
-    invalidateKeys: [["admins", "list"]],
-    successMessage: "Admin suspended",
-  });
-
-  const columns: ColumnDef<AdminUser>[] = [
-    {
-      accessorKey: "fullName",
-      header: "Administrator",
-      cell: ({ row }) => (
-        <div className="flex flex-col">
-          <span className="font-medium">{row.original.fullName}</span>
-          <span className="text-xs text-muted-foreground">
-            {row.original.email}
-          </span>
-        </div>
-      ),
-    },
-    {
-      accessorKey: "permissions",
-      header: "Roles",
-      cell: ({ row }) => (
-        <div className="flex flex-wrap gap-1">
-          {row.original.permissions.map((role) => (
-            <Badge
-              key={role}
-              variant="outline"
-              className={`text-[10px] px-1.5 py-0 ${ROLE_COLORS[role] || ""}`}
-            >
-              {role.replace(/_/g, " ")}
-            </Badge>
-          ))}
-        </div>
-      ),
-    },
-    {
-      accessorKey: "status",
-      header: "Status",
-      cell: ({ row }) => {
-        const config = STATUS_CONFIG[row.original.status];
-        const Icon = config.icon;
-        return (
-          <Badge variant="outline" className={`gap-1 ${config.className}`}>
-            <Icon className="size-3" />
-            {config.label}
-          </Badge>
-        );
-      },
-    },
-    {
-      accessorKey: "mfaEnabled",
-      header: "Security",
-      cell: ({ row }) => (
-        <div className="flex items-center gap-1.5 text-sm">
-          {row.original.mfaEnabled ? (
-            <>
-              <ShieldCheck className="size-3.5 text-emerald-600" />
-              <span className="text-emerald-600">2FA Active</span>
-            </>
-          ) : (
-            <>
-              <ShieldAlert className="size-3.5 text-amber-600" />
-              <span className="text-amber-600">No 2FA</span>
-            </>
-          )}
-        </div>
-      ),
-    },
-    {
-      accessorKey: "lastActive",
-      header: "Last Active",
-      cell: ({ row }) => {
-        if (!row.original.lastActive)
-          return <span className="text-muted-foreground text-sm">Never</span>;
-        const date = new Date(row.original.lastActive);
-        return (
-          <span className="text-sm text-muted-foreground">
-            {date.toLocaleString("en-GB", {
-              day: "numeric",
-              month: "short",
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
-        );
-      },
-    },
-    {
-      id: "actions",
-      cell: ({ row }) => (
-        <DropdownMenu>
-          <DropdownMenuTrigger>
-            <Button variant="ghost" size="icon" className="size-8">
-              <MoreHorizontal className="size-4" />
-              <span className="sr-only">Open menu</span>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Admin Actions</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem>Edit Roles</DropdownMenuItem>
-            <DropdownMenuItem>View Audit Trail</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            {row.original.status === "ACTIVE" && (
-              <DropdownMenuItem
-                className="text-orange-600 focus:text-orange-600"
-                onClick={() => suspendMutation.mutate(row.original.id)}
-              >
-                <Ban className="mr-2 size-4" />
-                Suspend Access
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem className="text-red-600 focus:text-red-600">
-              <XCircle className="mr-2 size-4" />
-              Deactivate
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ),
-    },
-  ];
-
-  const tableData = React.useMemo(() => data?.data ?? [], [data]);
-
-  const filteredData = React.useMemo(() => {
-    if (!searchQuery) return tableData;
-    const q = searchQuery.toLowerCase();
-    return tableData.filter(
-      (item) =>
-        item.fullName.toLowerCase().includes(q) ||
-        item.email.toLowerCase().includes(q),
-    );
-  }, [tableData, searchQuery]);
-
-  const table = useReactTable({
-    data: filteredData,
-    columns,
-    state: { sorting, columnFilters, pagination },
-    onSortingChange: setSorting,
-    onColumnFiltersChange: setColumnFilters,
-    onPaginationChange: setPagination,
-    getCoreRowModel: getCoreRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
-    getPaginationRowModel: getPaginationRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    manualPagination: true,
-    pageCount: data?.pagination?.totalPages ?? -1,
+  const filters = { status: status === "ALL" ? undefined : status };
+  const list = useCursorList({
+    queryKey: ["admins", "list"],
+    resetToken: JSON.stringify(filters),
+    limit: 50,
+    fetcher: ({ cursor, limit }) => adminApi.list({ ...filters, cursor, limit }),
   });
 
   return (
@@ -322,183 +89,59 @@ export default function AdminManagementPage() {
             <ShieldCheck className="size-5 text-primary" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">
-              Admin Management
-            </h1>
+            <h1 className="text-xl font-semibold tracking-tight">Admin Management</h1>
             <p className="text-sm text-muted-foreground">
-              Manage dashboard users, roles, and security policies
+              Manage dashboard administrators, roles, and MFA
             </p>
           </div>
         </div>
-        <Dialog open={inviteOpen} onOpenChange={setInviteOpen}>
-          <DialogTrigger>
-            <Button className="gap-2">
-              <UserPlus className="size-4" />
-              Invite Admin
-            </Button>
-          </DialogTrigger>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Invite New Administrator</DialogTitle>
-              <DialogDescription>
-                Send an email invitation with a secure signup link. They will be
-                required to set up 2FA.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-4 py-4">
-              <div className="grid gap-2">
-                <Label htmlFor="email">Email Address</Label>
-                <div className="relative">
-                  <Mail className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-                  <Input
-                    id="email"
-                    type="email"
-                    placeholder="colleague@company.com"
-                    className="pl-8"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="role">Primary Role</Label>
-                <Select
-                  value={inviteRole}
-                  onValueChange={(val) => { if (val !== null) setInviteRole(val as Role); }}
-                >
-                  <SelectTrigger id="role">
-                    <SelectValue placeholder="Select a role" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="SUPER_ADMIN">
-                        Super Admin (Full Access)
-                      </SelectItem>
-                      <SelectItem value="COMPLIANCE_OFFICER">
-                        Compliance Officer
-                      </SelectItem>
-                      <SelectItem value="FINANCE_MANAGER">
-                        Finance Manager
-                      </SelectItem>
-                      <SelectItem value="CUSTOMER_SUPPORT">
-                        Customer Support
-                      </SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setInviteOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                onClick={() => inviteMutation.mutate()}
-                disabled={!inviteEmail || inviteMutation.isPending}
-                className="gap-2"
-              >
-                {inviteMutation.isPending ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <Mail className="size-4" />
-                )}
-                Send Invite
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <InviteDialog />
       </div>
 
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap gap-2">
-          {(["ALL", "ACTIVE", "PENDING", "EXPIRED"] as const).map((status) => (
-            <Button
-              key={status}
-              variant={statusFilter === status ? "default" : "outline"}
-              size="sm"
-              onClick={() => {
-                setStatusFilter(status);
-                setPagination((prev) => ({ ...prev, pageIndex: 0 }));
-              }}
-              className="gap-1.5"
-            >
-              {status === "ALL"
-                ? "All"
-                : (STATUS_CONFIG[status as InvitationStatus]?.label ?? status)}
-            </Button>
-          ))}
-        </div>
-
-        <div className="relative w-full sm:w-64">
-          <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-          <Input
-            placeholder="Search name or email..."
-            className="pl-8"
-            value={searchQuery}
-            onChange={(e) => {
-              setSearchQuery(e.target.value);
-              setPagination((prev) => ({ ...prev, pageIndex: 0 }));
-            }}
-          />
-        </div>
+      <div className="flex flex-wrap gap-2">
+        {STATUS_TABS.map((s) => (
+          <Button
+            key={s}
+            variant={status === s ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatus(s)}
+          >
+            {s === "ALL" ? "All" : ADMIN_STATUS[s]?.label ?? s}
+          </Button>
+        ))}
       </div>
 
       <div className="overflow-hidden rounded-lg border">
         <Table>
           <TableHeader className="bg-muted/50">
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} colSpan={header.colSpan}>
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(
-                          header.column.columnDef.header,
-                          header.getContext(),
-                        )}
-                  </TableHead>
-                ))}
-              </TableRow>
-            ))}
+            <TableRow>
+              <TableHead>Administrator</TableHead>
+              <TableHead>Role</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>MFA</TableHead>
+              <TableHead>Last login</TableHead>
+              <TableHead className="w-10" />
+            </TableRow>
           </TableHeader>
           <TableBody>
-            {isLoading ? (
-              Array.from({ length: 5 }).map((_, i) => (
+            {list.isLoading ? (
+              Array.from({ length: 6 }).map((_, i) => (
                 <TableRow key={i}>
-                  {columns.map((_, j) => (
+                  {Array.from({ length: 6 }).map((_, j) => (
                     <TableCell key={j}>
                       <Skeleton className="h-5 w-full" />
                     </TableCell>
                   ))}
                 </TableRow>
               ))
-            ) : table.getRowModel().rows.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  className="transition-colors hover:bg-muted/50"
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
-                      {flexRender(
-                        cell.column.columnDef.cell,
-                        cell.getContext(),
-                      )}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
+            ) : list.items.length ? (
+              list.items.map((admin) => <AdminRow key={admin.id} admin={admin} />)
             ) : (
               <TableRow>
-                <TableCell
-                  colSpan={columns.length}
-                  className="h-32 text-center"
-                >
+                <TableCell colSpan={6} className="h-32 text-center">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <ShieldCheck className="size-8 opacity-40" />
-                    <p className="text-sm font-medium">
-                      No administrators found
-                    </p>
+                    <p className="text-sm font-medium">No administrators found</p>
                   </div>
                 </TableCell>
               </TableRow>
@@ -507,79 +150,296 @@ export default function AdminManagementPage() {
         </Table>
       </div>
 
-      <div className="flex items-center justify-between px-2">
-        <div className="text-sm text-muted-foreground">
-          Showing {table.getRowModel().rows.length} of{" "}
-          {data?.pagination?.total ?? 0} admin(s)
-        </div>
-        <div className="flex items-center gap-6">
-          <div className="hidden items-center gap-2 lg:flex">
-            <Label htmlFor="rows-per-page" className="text-sm font-medium">
-              Rows per page
-            </Label>
-            <Select
-              value={`${table.getState().pagination.pageSize}`}
-              onValueChange={(value) => table.setPageSize(Number(value))}
-              items={[5, 10, 20].map((s) => ({ label: `${s}`, value: `${s}` }))}
+      <CursorPagination
+        page={list.page}
+        canPrev={list.canPrev}
+        canNext={list.canNext}
+        onPrev={list.prev}
+        onNext={list.next}
+        total={list.meta?.total}
+        isFetching={list.isFetching}
+        itemLabel="admin"
+      />
+    </div>
+  );
+}
+
+function AdminRow({ admin }: { admin: AdminProfile }) {
+  const currentEmail = useAuthStore((s) => s.session?.email);
+  const isSelf = currentEmail === admin.email;
+  const [mfaOpen, setMfaOpen] = React.useState(false);
+  const [roleOpen, setRoleOpen] = React.useState(false);
+
+  const setStatus = useAuditedMutation({
+    action: "update_admin_status",
+    mutationFn: (next: AdminStatus) => adminApi.update(admin.id, { status: next }),
+    invalidateKeys: [["admins", "list"]],
+    successMessage: "Admin updated",
+  });
+  const resend = useAuditedMutation({
+    action: "resend_admin_invite",
+    mutationFn: () => adminApi.resendInvite(admin.id),
+    invalidateKeys: [["admins", "list"]],
+    successMessage: "Invite resent",
+  });
+
+  return (
+    <TableRow>
+      <TableCell className="font-medium">{admin.email}</TableCell>
+      <TableCell>
+        <Badge variant="outline">{admin.role.replace(/_/g, " ")}</Badge>
+      </TableCell>
+      <TableCell>
+        <StatusBadge value={admin.status} config={ADMIN_STATUS} />
+      </TableCell>
+      <TableCell>
+        {admin.mfaEnrolled ? (
+          <span className="flex items-center gap-1.5 text-sm text-emerald-600">
+            <ShieldCheck className="size-3.5" /> Enrolled
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 text-sm text-amber-600">
+            <ShieldAlert className="size-3.5" /> None
+          </span>
+        )}
+      </TableCell>
+      <TableCell className="text-sm text-muted-foreground">
+        {admin.lastLoginAt
+          ? new Date(admin.lastLoginAt).toLocaleString("en-GB", {
+              day: "numeric",
+              month: "short",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "Never"}
+      </TableCell>
+      <TableCell>
+        <DropdownMenu>
+          <DropdownMenuTrigger>
+            <Button variant="ghost" size="icon" className="size-8" disabled={isSelf}>
+              <MoreHorizontal className="size-4" />
+              <span className="sr-only">Actions</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel>Admin actions</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => setRoleOpen(true)}>Change role</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setMfaOpen(true)}>Reset MFA</DropdownMenuItem>
+            {admin.status === "PENDING" && (
+              <DropdownMenuItem onClick={() => resend.mutate()}>Resend invite</DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            {admin.status === "ACTIVE" ? (
+              <DropdownMenuItem
+                className="text-orange-600 focus:text-orange-600"
+                onClick={() => setStatus.mutate("SUSPENDED")}
+              >
+                Suspend
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onClick={() => setStatus.mutate("ACTIVE")}>
+                Reactivate
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem
+              className="text-red-600 focus:text-red-600"
+              onClick={() => setStatus.mutate("DEACTIVATED")}
             >
-              <SelectTrigger size="sm" className="w-18" id="rows-per-page">
+              Deactivate
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <ResetMfaDialog adminId={admin.id} open={mfaOpen} onOpenChange={setMfaOpen} />
+        <ChangeRoleDialog
+          adminId={admin.id}
+          current={admin.role}
+          open={roleOpen}
+          onOpenChange={setRoleOpen}
+        />
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function InviteDialog() {
+  const [open, setOpen] = React.useState(false);
+  const [email, setEmail] = React.useState("");
+  const [role, setRole] = React.useState<AdminRole>("CUSTOMER_SUPPORT");
+
+  const mutation = useAuditedMutation({
+    action: "invite_admin",
+    mutationFn: () => adminApi.invite({ email, role }),
+    invalidateKeys: [["admins", "list"]],
+    successMessage: "Invitation sent",
+    onSuccess: () => {
+      setOpen(false);
+      setEmail("");
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger>
+        <Button className="gap-2">
+          <UserPlus className="size-4" />
+          Invite Admin
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Invite administrator</DialogTitle>
+          <DialogDescription>
+            Sends an activation email. They set a password and enroll MFA.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-2">
+          <div className="grid gap-2">
+            <Label htmlFor="invite-email">Email</Label>
+            <div className="relative">
+              <Mail className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+              <Input
+                id="invite-email"
+                type="email"
+                className="pl-8"
+                placeholder="colleague@company.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <Label>Role</Label>
+            <Select value={role} onValueChange={(v) => setRole(v as AdminRole)}>
+              <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent side="top">
-                <SelectGroup>
-                  {[5, 10, 20].map((size) => (
-                    <SelectItem key={size} value={`${size}`}>
-                      {size}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
+              <SelectContent>
+                {ROLES.map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r.replace(/_/g, " ")}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
-          <div className="text-sm font-medium">
-            Page {table.getState().pagination.pageIndex + 1} of{" "}
-            {table.getPageCount() === -1 ? 1 : table.getPageCount()}
-          </div>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-8"
-              onClick={() => table.setPageIndex(0)}
-              disabled={!table.getCanPreviousPage()}
-            >
-              <ChevronsLeftIcon className="size-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-8"
-              onClick={() => table.previousPage()}
-              disabled={!table.getCanPreviousPage()}
-            >
-              <ChevronLeftIcon className="size-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-8"
-              onClick={() => table.nextPage()}
-              disabled={!table.getCanNextPage()}
-            >
-              <ChevronRightIcon className="size-4" />
-            </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-8"
-              onClick={() => table.setPageIndex(table.getPageCount() - 1)}
-              disabled={!table.getCanNextPage()}
-            >
-              <ChevronsRightIcon className="size-4" />
-            </Button>
-          </div>
         </div>
-      </div>
-    </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => email && mutation.mutate()} disabled={!email || mutation.isPending}>
+            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+            Send invite
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ResetMfaDialog({
+  adminId,
+  open,
+  onOpenChange,
+}: {
+  adminId: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [note, setNote] = React.useState("");
+  const mutation = useAuditedMutation({
+    action: "reset_admin_mfa",
+    mutationFn: () => adminApi.resetMfa(adminId, { offlineVerificationNote: note }),
+    invalidateKeys: [["admins", "list"]],
+    successMessage: "MFA reset",
+    onSuccess: () => {
+      onOpenChange(false);
+      setNote("");
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Reset MFA</DialogTitle>
+          <DialogDescription>
+            Document how you verified this admin&apos;s identity out-of-band.
+          </DialogDescription>
+        </DialogHeader>
+        <Textarea
+          placeholder="e.g. Identity verified via Zoom call on 2026-07-03"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+        />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => note.trim() && mutation.mutate()} disabled={!note.trim() || mutation.isPending}>
+            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+            Reset MFA
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ChangeRoleDialog({
+  adminId,
+  current,
+  open,
+  onOpenChange,
+}: {
+  adminId: string;
+  current: AdminRole;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [role, setRole] = React.useState<AdminRole>(current);
+  const mutation = useAuditedMutation({
+    action: "update_admin_role",
+    // Always confirm — active JWTs keep the old role until they expire.
+    mutationFn: () => adminApi.update(adminId, { role, confirmRoleChange: true }),
+    invalidateKeys: [["admins", "list"]],
+    successMessage: "Role updated",
+    onSuccess: () => onOpenChange(false),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Change role</DialogTitle>
+          <DialogDescription>
+            Existing sessions keep the old role until their tokens expire.
+          </DialogDescription>
+        </DialogHeader>
+        <Select value={role} onValueChange={(v) => setRole(v as AdminRole)}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {ROLES.map((r) => (
+              <SelectItem key={r} value={r}>
+                {r.replace(/_/g, " ")}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => mutation.mutate()} disabled={role === current || mutation.isPending}>
+            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

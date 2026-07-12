@@ -1,28 +1,37 @@
 /**
- * Auth store — Zustand RBAC context + token storage
- * PRD §4.1 — Permissions stored in Zustand, drives sidebar nav and ProtectedAction wrapper
+ * Auth store — Zustand session + token storage
  *
- * Aligned with openapi.yaml: stores accessToken and refreshToken from /user/signin.
+ * Aligned with the JJS Admin Service API (openapi-admin.yaml):
+ * - `session` mirrors the spec's AdminProfile (single `role`).
+ * - `accessToken` is a 15-minute JWT; `refreshToken` is a 7-day rotating token.
+ * Tokens are attached as `Authorization: Bearer <accessToken>` by the axios client.
  */
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { AdminSession, Role } from "@/lib/auth/types";
 
+/** localStorage key used by the persist middleware. */
+export const AUTH_STORAGE_KEY = "auth-storage";
+
 interface AuthState {
   session: AdminSession | null;
-  /** JWT access token from /user/signin */
+  /** JWT access token from POST /auth/totp/verify (15 min). */
   accessToken: string | null;
-  /** Refresh token from /user/signin */
+  /** Rotating refresh token from POST /auth/totp/verify (7 days). */
   refreshToken: string | null;
   isAuthenticated: boolean;
 
   // Actions
-  setSession: (session: AdminSession, accessToken: string, refreshToken: string) => void;
-  /** Update tokens only (e.g. after a refresh) */
+  setSession: (
+    session: AdminSession,
+    accessToken: string,
+    refreshToken: string,
+  ) => void;
+  /** Update tokens only (e.g. after a refresh rotation). */
   setTokens: (accessToken: string, refreshToken: string) => void;
   clearSession: () => void;
-  /** Check if the current admin holds at least one of the allowed roles */
+  /** True when the current admin's role is one of the allowed roles. */
   hasRole: (allowedRoles: Role[]) => boolean;
 }
 
@@ -51,12 +60,11 @@ export const useAuthStore = create<AuthState>()(
       hasRole: (allowedRoles) => {
         const { session } = get();
         if (!session) return false;
-        // Check if at least one of the admin's permissions matches the allowed roles
-        return session.permissions.some((perm) => allowedRoles.includes(perm));
+        return allowedRoles.includes(session.role);
       },
     }),
     {
-      name: "auth-storage",
-    }
-  )
+      name: AUTH_STORAGE_KEY,
+    },
+  ),
 );
