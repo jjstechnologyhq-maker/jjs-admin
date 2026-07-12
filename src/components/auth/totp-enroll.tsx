@@ -2,7 +2,10 @@
 
 /**
  * TOTP enrollment — renders the otpauth QR + secret and confirms a code.
- * Shared by the invite-activation and authenticated setup flows.
+ *
+ * Used by the invite-activation flow and the authenticated setup flow.
+ * Accepts an optional `sessionToken` for the login-flow variant (where no
+ * Bearer token exists yet) vs. the authenticated variant.
  */
 
 import { useState } from "react";
@@ -26,10 +29,13 @@ type FormData = z.infer<typeof schema>;
 export function TotpEnroll({
   otpauthUrl,
   secret,
+  sessionToken,
   onConfirmed,
 }: {
   otpauthUrl: string;
   secret: string;
+  /** If provided, passed in the body for the session-based (unauthenticated) flow. */
+  sessionToken?: string;
   onConfirmed: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +47,22 @@ export function TotpEnroll({
   const onSubmit = async (data: FormData) => {
     setError(null);
     try {
-      await authApi.confirmTotp({ totpToken: data.totpToken });
+      // When sessionToken is available, use the session-based flow.
+      // When it's not (authenticated flow), the Bearer token will be
+      // attached automatically by the axios interceptor.
+      if (sessionToken) {
+        await authApi.confirmTotp({
+          sessionToken,
+          totpToken: data.totpToken,
+        });
+      } else {
+        // Authenticated flow — send without sessionToken.
+        // The spec's TotpConfirmRequest only has totpToken.
+        await authApi.confirmTotp({
+          sessionToken: "", // Will be ignored by server in Bearer-auth mode
+          totpToken: data.totpToken,
+        });
+      }
       onConfirmed();
     } catch (err) {
       setError(getErrorMessage(err, "Invalid or expired code"));
@@ -97,7 +118,7 @@ export function TotpEnroll({
 
         <Button type="submit" className="mt-4 w-full" disabled={formState.isSubmitting}>
           {formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          Confirm & activate
+          Confirm &amp; activate
         </Button>
       </form>
     </div>

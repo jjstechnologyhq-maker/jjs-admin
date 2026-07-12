@@ -1,5 +1,16 @@
 "use client";
 
+/**
+ * Change Password page — for already-authenticated admins who want to
+ * voluntarily change their password.
+ *
+ * NOTE: The "forced password change" for first-time seeded admins is now
+ * handled inline in the LoginForm (Step 5: force-pw), which uses
+ * POST /auth/force-password-change with the sessionToken in the body.
+ * This page uses the authenticated POST /auth/change-password endpoint
+ * (Bearer token required).
+ */
+
 import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -42,6 +53,19 @@ function ChangePasswordForm() {
     resolver: zodResolver(schema),
   });
 
+  // If someone navigates here with ?forced=1 but no session, redirect to login.
+  // The forced password change for first-time logins is handled in LoginForm.
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+
+  if (forced && !isAuthenticated) {
+    // The first-time forced-pw flow is now inline in LoginForm.
+    // Redirect there.
+    if (typeof window !== "undefined") {
+      router.replace("/login");
+    }
+    return null;
+  }
+
   const onSubmit = async (data: FormData) => {
     setError(null);
     try {
@@ -50,7 +74,7 @@ function ChangePasswordForm() {
         newPassword: data.newPassword,
       });
       toast.success("Password changed. Please sign in with your new password.");
-      // A fresh login is required afterwards (forced flow issues no JWT).
+      // A fresh login is required afterwards.
       clearSession();
       router.push("/login");
     } catch (err) {
@@ -73,9 +97,7 @@ function ChangePasswordForm() {
         </div>
         <h1 className="mt-2 text-xl font-bold">Change your password</h1>
         <FieldDescription>
-          {forced
-            ? "You must set a new password before continuing."
-            : "Choose a new password of at least 12 characters."}
+          Choose a new password of at least 12 characters.
         </FieldDescription>
       </div>
 

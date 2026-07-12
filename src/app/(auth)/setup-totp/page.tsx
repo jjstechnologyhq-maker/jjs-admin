@@ -1,26 +1,38 @@
 "use client";
 
+/**
+ * Setup TOTP page — for authenticated admins who need to enroll MFA.
+ *
+ * This page is used by admins who already have a Bearer token (e.g. after
+ * invite activation) but haven't enrolled MFA yet. It calls POST /auth/totp/setup
+ * as an authenticated request (Bearer token attached by axios interceptor).
+ *
+ * NOTE: First-time seeded-admin TOTP setup during login is handled inline
+ * in the LoginForm component, which uses the session-based (body) flow.
+ */
+
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { FieldDescription } from "@/components/ui/field";
-import { authApi } from "@/api/auth";
+import { authApi, type TotpSetupResponse } from "@/api/auth";
 import { getErrorCode, getErrorMessage } from "@/api/client";
-import type { TotpSetupResult } from "@/api/schema";
 import { TotpEnroll } from "@/components/auth/totp-enroll";
 
 export default function SetupTotpPage() {
   const router = useRouter();
-  const [totp, setTotp] = useState<TotpSetupResult | null>(null);
+  const [totp, setTotp] = useState<TotpSetupResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
+    // For the authenticated flow, we pass an empty string as sessionToken —
+    // the Bearer token is attached by the axios interceptor.
     authApi
-      .setupTotp()
+      .setupTotp("")
       .then((res) => {
         if (!cancelled) setTotp(res);
       })
