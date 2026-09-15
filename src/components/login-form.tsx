@@ -47,8 +47,13 @@ import {
 import { Input } from "@/components/ui/input";
 
 import { useAuthStore } from "@/stores/auth-store";
-import { authApi, isForcePasswordChange, type TotpSetupResponse } from "@/api/auth";
+import {
+  authApi,
+  isForcePasswordChange,
+  type TotpSetupResponse,
+} from "@/api/auth";
 import { getErrorCode, getErrorMessage } from "@/api/client";
+// import { AxiosError } from "axios";
 
 // ── Zod schemas ────────────────────────────────────────────────────────────
 
@@ -129,11 +134,7 @@ function StepIndicator({
                   "bg-muted text-muted-foreground/50",
               )}
             >
-              {isComplete ? (
-                <CheckCircle2 className="size-3.5" />
-              ) : (
-                idx + 1
-              )}
+              {isComplete ? <CheckCircle2 className="size-3.5" /> : idx + 1}
             </div>
             {idx < steps.length - 1 && (
               <div
@@ -204,6 +205,7 @@ export function LoginForm({
       const result = await authApi.login(data);
       setSessionToken(result.sessionToken);
       setSecondsLeft(SESSION_TTL_SECONDS);
+      // console.log(result);
 
       if (result.mfaRequired) {
         // Need to determine: is MFA already enrolled or first time?
@@ -220,6 +222,7 @@ export function LoginForm({
           setStep("totp-setup");
         } catch (setupErr) {
           const setupCode = getErrorCode(setupErr);
+          // console.log((setupErr as unknown as AxiosError).status, setupCode);
           if (setupCode === "MFA_ALREADY_ENROLLED") {
             // Already enrolled → go straight to verify
             setIsFirstTime(false);
@@ -234,6 +237,7 @@ export function LoginForm({
         }
       }
     } catch (err) {
+      console.log(err);
       const code = getErrorCode(err);
       if (code === "TOO_MANY_ATTEMPTS") {
         setError("Too many failed attempts. Try again in 10 minutes.");
@@ -384,7 +388,8 @@ export function LoginForm({
     "force-pw": {
       icon: <Lock className="size-6" />,
       title: "Set your password",
-      description: "Choose a new password (at least 12 characters) to replace the seeded one",
+      description:
+        "Choose a new password (at least 12 characters) to replace the seeded one",
     },
   };
 

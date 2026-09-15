@@ -75,6 +75,7 @@ export const authApi = {
   /** Step 1 — password auth. Returns a 5-minute session token. */
   login: async (data: LoginRequest): Promise<LoginResult> => {
     const res = await apiClient.post<LoginResult>("/auth/login", data);
+    // console.log(res);
     return res.data;
   },
 
