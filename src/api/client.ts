@@ -29,15 +29,39 @@ export const apiClient = axios.create({
 
 /** Extract the machine-readable `details.errorCode` from an API error, if any. */
 export function getErrorCode(error: unknown): string | undefined {
-  if (error instanceof AxiosError) {
+  // Prefer axios.isAxiosError because the runtime value check is more reliable
+  if (axios.isAxiosError(error)) {
     const data = error.response?.data as ErrorResponse | undefined;
-    return data?.details?.errorCode ?? undefined;
+    // Primary source: explicit machine-readable code in details
+    const explicit = data?.details?.errorCode;
+    if (explicit) return explicit;
+
+    // Heuristic mappings for servers that return `details: null` but a useful message
+    const msg = typeof data?.message === "string" ? data!.message : undefined;
+    if (msg) {
+      const normal = msg.toLowerCase();
+      if (/mfa.*enroll/i.test(msg) || /already enrolled/i.test(msg)) return "MFA_ALREADY_ENROLLED";
+      if (/mfa.*not enrolled/i.test(msg) || /not set up/i.test(msg)) return "MFA_NOT_ENROLLED";
+      if (/invalid email|invalid password|invalid credentials/i.test(normal)) return "INVALID_CREDENTIALS";
+      if (/too many failed attempts|too many attempts/i.test(normal)) return "TOO_MANY_ATTEMPTS";
+      if (/suspend/i.test(normal)) return "ACCOUNT_SUSPENDED";
+      if (/session expired/i.test(normal)) return "SESSION_EXPIRED";
+      if (/refresh token/i.test(normal)) return "REFRESH_TOKEN_INVALID";
+      if (/password.*same/i.test(normal)) return "PASSWORD_SAME_AS_CURRENT";
+    }
+
+    // Fallback: if the API returned a numeric code, expose it as a string so callers
+    // can still branch on it if they expect e.g. "409" etc.
+    if (data?.code !== undefined && data?.code !== null) return String(data.code);
   }
   return undefined;
 }
 
 /** Extract a human-readable message from an API error, with a fallback. */
-export function getErrorMessage(error: unknown, fallback = "Something went wrong"): string {
+export function getErrorMessage(
+  error: unknown,
+  fallback = "Something went wrong",
+): string {
   if (error instanceof AxiosError) {
     const data = error.response?.data as ErrorResponse | undefined;
     return data?.message || error.message || fallback;
@@ -57,7 +81,10 @@ const TERMINAL_AUTH_CODES = new Set([
 
 function redirectToLogin() {
   useAuthStore.getState().clearSession();
-  if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+  if (
+    typeof window !== "undefined" &&
+    !window.location.pathname.startsWith("/login")
+  ) {
     window.location.href = "/login";
   }
 }
@@ -127,16 +154,30 @@ apiClient.interceptors.response.use(
 
     // Never try to refresh the refresh call itself, and only retry once.
     const isRefreshCall = original.url?.includes("/auth/refresh");
+    // If there's no saved refresh token (e.g. we're performing the initial /auth/login
+    // as part of sign-in), don't attempt a token rotation — surface the original
+    // API error so the UI can show the server-provided message instead of a
+    // refresh failure like "No refresh token".
+    const { refreshToken: _currentRefresh } = useAuthStore.getState();
+    const canAttemptRefresh = Boolean(_currentRefresh);
     if (isRefreshCall || original._retry) {
       redirectToLogin();
       return Promise.reject(error);
     }
 
     // Access token likely expired — attempt a single refresh + replay.
+    // If we cannot attempt refresh (no stored refresh token), surface original error
+    if (!canAttemptRefresh) {
+      return Promise.reject(error);
+    }
+
     try {
       original._retry = true;
       const newToken = await refreshAccessToken();
-      original.headers = { ...original.headers, Authorization: `Bearer ${newToken}` };
+      original.headers = {
+        ...original.headers,
+        Authorization: `Bearer ${newToken}`,
+      };
       return apiClient(original);
     } catch (refreshError) {
       redirectToLogin();
