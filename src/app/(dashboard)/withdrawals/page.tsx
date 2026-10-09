@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -41,6 +42,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge, WITHDRAWAL_STATUS } from "@/components/status-badge";
 import { CursorPagination } from "@/components/cursor-pagination";
 import { useCursorList } from "@/hooks/use-cursor-list";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { financeApi } from "@/api/finance";
 import type { WithdrawalStatus } from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
@@ -57,13 +59,17 @@ const STATUSES: WithdrawalStatus[] = [
 export default function WithdrawalsPage() {
   const [status, setStatus] = React.useState<WithdrawalStatus | "ALL">("PENDING");
   const [highRiskOnly, setHighRiskOnly] = React.useState(false);
+  const [asset, setAsset] = React.useState("");
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [rejectOpen, setRejectOpen] = React.useState(false);
   const [rejectReason, setRejectReason] = React.useState("");
 
+  const debouncedAsset = useDebouncedValue(asset.trim().toUpperCase(), 350);
+
   const filters = {
     status: status === "ALL" ? undefined : status,
     isHighRisk: highRiskOnly ? true : undefined,
+    asset: debouncedAsset || undefined,
   };
 
   const list = useCursorList({
@@ -141,6 +147,12 @@ export default function WithdrawalsPage() {
             ))}
           </SelectContent>
         </Select>
+        <Input
+          placeholder="Asset (e.g. BTC)"
+          className="w-40"
+          value={asset}
+          onChange={(e) => setAsset(e.target.value)}
+        />
         <label className="flex items-center gap-2 text-sm">
           <Checkbox
             checked={highRiskOnly}

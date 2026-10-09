@@ -151,6 +151,57 @@ function StepIndicator({
   );
 }
 
+// ── Session-expiry helpers ─────────────────────────────────────────────────
+
+function formatTime(s: number) {
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function SessionTimer({
+  step,
+  expired,
+  secondsLeft,
+}: {
+  step: Step;
+  expired: boolean;
+  secondsLeft: number;
+}) {
+  if (step === "credentials") return null;
+  return (
+    <div
+      className={cn(
+        "flex items-center justify-center gap-1.5 text-xs font-medium rounded-full px-3 py-1 mx-auto w-fit",
+        expired
+          ? "bg-destructive/10 text-destructive"
+          : secondsLeft < 60
+            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+            : "bg-muted text-muted-foreground",
+      )}
+    >
+      {expired ? (
+        "Session expired — sign in again"
+      ) : (
+        <>
+          <span className="inline-block size-1.5 rounded-full bg-current animate-pulse" />
+          Session expires in {formatTime(secondsLeft)}
+        </>
+      )}
+    </div>
+  );
+}
+
+function DebugTokenHint({ token }: { token: string | null }) {
+  if (!token) return null;
+  return (
+    <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+      <span className="font-semibold">Dev mode:</span> Use code{" "}
+      <code className="rounded bg-amber-500/10 px-1.5 py-0.5 font-mono font-bold">
+        {token}
+      </code>
+    </div>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────
 
 export function LoginForm({
@@ -356,9 +407,6 @@ export function LoginForm({
     setTimeout(() => setCopied(false), 1500);
   };
 
-  const formatTime = (s: number) =>
-    `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-
   // ── Step icons + headings ──────────────────────────────────────────────
 
   const stepConfig: Record<
@@ -395,47 +443,6 @@ export function LoginForm({
 
   const { icon, title, description } = stepConfig[step];
 
-  // ── Session expiry banner ──────────────────────────────────────────────
-
-  const SessionTimer = () => {
-    if (step === "credentials") return null;
-    return (
-      <div
-        className={cn(
-          "flex items-center justify-center gap-1.5 text-xs font-medium rounded-full px-3 py-1 mx-auto w-fit",
-          expired
-            ? "bg-destructive/10 text-destructive"
-            : secondsLeft < 60
-              ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
-              : "bg-muted text-muted-foreground",
-        )}
-      >
-        {expired ? (
-          "Session expired — sign in again"
-        ) : (
-          <>
-            <span className="inline-block size-1.5 rounded-full bg-current animate-pulse" />
-            Session expires in {formatTime(secondsLeft)}
-          </>
-        )}
-      </div>
-    );
-  };
-
-  // ── Debug token hint ───────────────────────────────────────────────────
-
-  const DebugTokenHint = ({ token }: { token: string | null }) => {
-    if (!token) return null;
-    return (
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-        <span className="font-semibold">Dev mode:</span> Use code{" "}
-        <code className="rounded bg-amber-500/10 px-1.5 py-0.5 font-mono font-bold">
-          {token}
-        </code>
-      </div>
-    );
-  };
-
   // ── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -451,7 +458,7 @@ export function LoginForm({
         <FieldDescription>{description}</FieldDescription>
       </div>
 
-      <SessionTimer />
+      <SessionTimer step={step} expired={expired} secondsLeft={secondsLeft} />
 
       {/* Loading spinner (for auto-detection of MFA enrollment) */}
       {loading && (

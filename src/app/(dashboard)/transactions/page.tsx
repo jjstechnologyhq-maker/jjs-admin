@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -25,7 +26,9 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge, TRANSACTION_STATUS } from "@/components/status-badge";
 import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
 import { useCursorList } from "@/hooks/use-cursor-list";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { transactionsApi } from "@/api/transactions";
 import type { TransactionType, TransactionStatus } from "@/api/schema";
 import { formatMoney } from "@/lib/money";
@@ -54,11 +57,23 @@ export default function TransactionsPage() {
   const router = useRouter();
   const [type, setType] = React.useState<TransactionType | "ALL">("ALL");
   const [status, setStatus] = React.useState<TransactionStatus | "ALL">("ALL");
+  const [userId, setUserId] = React.useState("");
+  const [dateFrom, setDateFrom] = React.useState("");
+  const [dateTo, setDateTo] = React.useState("");
+  const [amountMin, setAmountMin] = React.useState("");
+  const [amountMax, setAmountMax] = React.useState("");
   const [exporting, setExporting] = React.useState(false);
+
+  const debouncedUserId = useDebouncedValue(userId.trim(), 350);
 
   const filters = {
     type: type === "ALL" ? undefined : type,
     status: status === "ALL" ? undefined : status,
+    userId: debouncedUserId || undefined,
+    dateFrom: dateFrom ? `${dateFrom}T00:00:00.000Z` : undefined,
+    dateTo: dateTo ? `${dateTo}T23:59:59.999Z` : undefined,
+    amountMin: amountMin ? parseFloat(amountMin) : undefined,
+    amountMax: amountMax ? parseFloat(amountMax) : undefined,
   };
 
   const list = useCursorList({
@@ -104,6 +119,12 @@ export default function TransactionsPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by user ID (UUID)"
+          value={userId}
+          onChange={setUserId}
+        />
         <Select value={type} onValueChange={(v) => setType(v as TransactionType | "ALL")}>
           <SelectTrigger size="sm" className="w-40">
             <SelectValue placeholder="Type" />
@@ -130,6 +151,46 @@ export default function TransactionsPage() {
             ))}
           </SelectContent>
         </Select>
+        <div className="flex items-center gap-2">
+          <Input
+            type="date"
+            aria-label="From date"
+            className="w-40"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+          />
+          <span className="text-sm text-muted-foreground">to</span>
+          <Input
+            type="date"
+            aria-label="To date"
+            className="w-40"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            type="number"
+            min="0"
+            step="any"
+            aria-label="Minimum amount"
+            placeholder="Min amount"
+            className="w-32"
+            value={amountMin}
+            onChange={(e) => setAmountMin(e.target.value)}
+          />
+          <span className="text-sm text-muted-foreground">–</span>
+          <Input
+            type="number"
+            min="0"
+            step="any"
+            aria-label="Maximum amount"
+            placeholder="Max amount"
+            className="w-32"
+            value={amountMax}
+            onChange={(e) => setAmountMax(e.target.value)}
+          />
+        </div>
       </div>
 
       <div className="overflow-hidden rounded-lg border">

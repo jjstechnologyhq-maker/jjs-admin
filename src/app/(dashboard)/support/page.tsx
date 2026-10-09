@@ -43,9 +43,12 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge, type StatusMeta } from "@/components/status-badge";
 import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
 import { useCursorList } from "@/hooks/use-cursor-list";
+import { useClientTable } from "@/hooks/use-client-table";
+import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { supportApi } from "@/api/support";
-import type { TicketStatusEnum, BannerTypeEnum } from "@/api/schema";
+import type { TicketStatusEnum, BannerTypeEnum, EmailTemplateResponse, BannerResponse } from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
 
 const TICKET_STATUS: Record<string, StatusMeta> = {
@@ -55,6 +58,10 @@ const TICKET_STATUS: Record<string, StatusMeta> = {
 };
 const BANNER_TYPES: BannerTypeEnum[] = ["INFO", "WARNING", "MAINTENANCE"];
 const TABS = ["Tickets", "Banners", "Templates", "Notify"] as const;
+
+function matchTemplate(t: EmailTemplateResponse, q: string) {
+  return `${t.name} ${t.subject}`.toLowerCase().includes(q);
+}
 
 export default function SupportPage() {
   const [tab, setTab] = React.useState<(typeof TABS)[number]>("Tickets");
@@ -93,9 +100,14 @@ export default function SupportPage() {
 
 function TicketsPanel() {
   const [status, setStatus] = React.useState<TicketStatusEnum | "ALL">("ALL");
+  const [assignedTo, setAssignedTo] = React.useState("");
   const [active, setActive] = React.useState<string | null>(null);
 
-  const filters = { status: status === "ALL" ? undefined : status };
+  const debouncedAssignedTo = useDebouncedValue(assignedTo.trim(), 350);
+  const filters = {
+    status: status === "ALL" ? undefined : status,
+    assignedTo: debouncedAssignedTo || undefined,
+  };
   const list = useCursorList({
     queryKey: ["support", "tickets"],
     resetToken: JSON.stringify(filters),
@@ -105,12 +117,20 @@ function TicketsPanel() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex gap-2">
-        {(["ALL", "OPEN", "IN_PROGRESS", "CLOSED"] as const).map((s) => (
-          <Button key={s} variant={status === s ? "default" : "outline"} size="sm" onClick={() => setStatus(s)}>
-            {s === "ALL" ? "All" : TICKET_STATUS[s].label}
-          </Button>
-        ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-2">
+          {(["ALL", "OPEN", "IN_PROGRESS", "CLOSED"] as const).map((s) => (
+            <Button key={s} variant={status === s ? "default" : "outline"} size="sm" onClick={() => setStatus(s)}>
+              {s === "ALL" ? "All" : TICKET_STATUS[s].label}
+            </Button>
+          ))}
+        </div>
+        <Input
+          placeholder="Filter by assignee admin ID (UUID)"
+          className="w-full sm:w-72"
+          value={assignedTo}
+          onChange={(e) => setAssignedTo(e.target.value)}
+        />
       </div>
 
       <div className="overflow-hidden rounded-lg border">
@@ -264,12 +284,18 @@ function BannersPanel() {
     queryKey: ["support", "banners"],
     queryFn: () => supportApi.listBanners(),
   });
+  const [query, setQuery] = React.useState("");
   const del = useAuditedMutation({
     action: "delete_banner",
     mutationFn: (id: string) => supportApi.deleteBanner(id),
     invalidateKeys: [["support", "banners"]],
     successMessage: "Banner deleted",
   });
+
+  const q = query.trim().toLowerCase();
+  const filtered: BannerResponse[] = (data ?? []).filter((b) =>
+    `${b.type} ${b.message}`.toLowerCase().includes(q),
+  );
 
   return (
     <Card>
@@ -281,10 +307,16 @@ function BannersPanel() {
         <CreateBannerDialog />
       </CardHeader>
       <CardContent className="grid gap-3">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by type or message"
+          value={query}
+          onChange={setQuery}
+        />
         {isLoading ? (
           <Skeleton className="h-16 w-full" />
-        ) : data?.length ? (
-          data.map((b) => (
+        ) : filtered.length ? (
+          filtered.map((b) => (
             <div key={b.id} className="flex items-center justify-between rounded-md border p-3">
               <div className="flex items-center gap-3">
                 <Badge variant="outline">{b.type}</Badge>
@@ -302,7 +334,9 @@ function BannersPanel() {
             </div>
           ))
         ) : (
-          <p className="text-sm text-muted-foreground">No active banners</p>
+          <p className="text-sm text-muted-foreground">
+            {q ? "No banners match your search" : "No active banners"}
+          </p>
         )}
       </CardContent>
     </Card>
@@ -367,6 +401,14 @@ function TemplatesPanel() {
     queryFn: () => supportApi.listTemplates(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchTemplate,
+    pageSize: 10,
+  });
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -376,7 +418,13 @@ function TemplatesPanel() {
         </div>
         <CreateTemplateDialog />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by name or subject"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -395,8 +443,8 @@ function TemplatesPanel() {
                     ))}
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((t) => (
+              ) : table.total ? (
+                table.rows.map((t) => (
                   <TableRow key={t.id}>
                     <TableCell className="font-medium">{t.name}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">{t.subject}</TableCell>
@@ -408,13 +456,23 @@ function TemplatesPanel() {
               ) : (
                 <TableRow>
                   <TableCell colSpan={3} className="h-20 text-center text-sm text-muted-foreground">
-                    No templates
+                    {query ? "No templates match your search" : "No templates"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="template"
+        />
       </CardContent>
     </Card>
   );

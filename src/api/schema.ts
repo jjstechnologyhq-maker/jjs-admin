@@ -63,6 +63,15 @@ export type TransactionResponse = Schemas["TransactionResponse"];
 export type PaginatedTransactions = Schemas["PaginatedTransactions"];
 export type VasActionRequest = Schemas["VasActionRequest"];
 
+// ── Transaction Limits ─────────────────────────────────────────────────────
+export type LimitKind = "swap" | "transfer" | "withdrawal";
+export type LimitMode = "merge" | "replace";
+export type LimitRange = Schemas["LimitRange"];
+export type TransactionLimitsDocument = Schemas["TransactionLimitsDocument"];
+export type TransactionLimitsView = Schemas["TransactionLimitsView"];
+export type EffectiveTransactionLimits = Schemas["EffectiveTransactionLimits"];
+export type SetTransactionLimitsRequest = Schemas["SetTransactionLimitsRequest"];
+
 // ── Finance ────────────────────────────────────────────────────────────────
 export type WalletType = Schemas["WalletType"];
 export type AdjustmentDirection = Schemas["AdjustmentDirection"];

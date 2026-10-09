@@ -38,6 +38,10 @@ export const ROUTE_ACCESS_MAP: { prefix: string; roles: Role[] }[] = [
   { prefix: "/liquidity", roles: [ROLES.SUPER_ADMIN, ROLES.FINANCE_MANAGER] },
   { prefix: "/pricing", roles: [ROLES.SUPER_ADMIN, ROLES.FINANCE_MANAGER] },
   { prefix: "/fees", roles: [ROLES.SUPER_ADMIN, ROLES.FINANCE_MANAGER] },
+  {
+    prefix: "/transaction-limits",
+    roles: [ROLES.SUPER_ADMIN, ROLES.FINANCE_MANAGER],
+  },
 
   // Transaction monitoring — Compliance + Finance
   {

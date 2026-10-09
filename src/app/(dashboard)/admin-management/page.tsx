@@ -33,6 +33,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -50,6 +51,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge, ADMIN_STATUS } from "@/components/status-badge";
 import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
 import { useCursorList } from "@/hooks/use-cursor-list";
 import { adminApi } from "@/api/admin";
 import type { AdminProfile, AdminRole, AdminStatus } from "@/api/schema";
@@ -72,6 +74,7 @@ const STATUS_TABS: (AdminStatus | "ALL")[] = [
 
 export default function AdminManagementPage() {
   const [status, setStatus] = React.useState<AdminStatus | "ALL">("ALL");
+  const [query, setQuery] = React.useState("");
 
   const filters = { status: status === "ALL" ? undefined : status };
   const list = useCursorList({
@@ -80,6 +83,15 @@ export default function AdminManagementPage() {
     limit: 50,
     fetcher: ({ cursor, limit }) => adminApi.list({ ...filters, cursor, limit }),
   });
+
+  // The API only filters by status, so search applies to the loaded page.
+  const filtered = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return list.items;
+    return list.items.filter((a) =>
+      `${a.email} ${a.role} ${a.id}`.toLowerCase().includes(q),
+    );
+  }, [list.items, query]);
 
   return (
     <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
@@ -98,17 +110,25 @@ export default function AdminManagementPage() {
         <InviteDialog />
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {STATUS_TABS.map((s) => (
-          <Button
-            key={s}
-            variant={status === s ? "default" : "outline"}
-            size="sm"
-            onClick={() => setStatus(s)}
-          >
-            {s === "ALL" ? "All" : ADMIN_STATUS[s]?.label ?? s}
-          </Button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-2">
+          {STATUS_TABS.map((s) => (
+            <Button
+              key={s}
+              variant={status === s ? "default" : "outline"}
+              size="sm"
+              onClick={() => setStatus(s)}
+            >
+              {s === "ALL" ? "All" : ADMIN_STATUS[s]?.label ?? s}
+            </Button>
+          ))}
+        </div>
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search this page (email, role, ID)"
+          value={query}
+          onChange={setQuery}
+        />
       </div>
 
       <div className="overflow-hidden rounded-lg border">
@@ -134,14 +154,16 @@ export default function AdminManagementPage() {
                   ))}
                 </TableRow>
               ))
-            ) : list.items.length ? (
-              list.items.map((admin) => <AdminRow key={admin.id} admin={admin} />)
+            ) : filtered.length ? (
+              filtered.map((admin) => <AdminRow key={admin.id} admin={admin} />)
             ) : (
               <TableRow>
                 <TableCell colSpan={6} className="h-32 text-center">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <ShieldCheck className="size-8 opacity-40" />
-                    <p className="text-sm font-medium">No administrators found</p>
+                    <p className="text-sm font-medium">
+                      {query ? "No administrators match your search" : "No administrators found"}
+                    </p>
                   </div>
                 </TableCell>
               </TableRow>
@@ -215,14 +237,17 @@ function AdminRow({ admin }: { admin: AdminProfile }) {
       </TableCell>
       <TableCell>
         <DropdownMenu>
-          <DropdownMenuTrigger>
-            <Button variant="ghost" size="icon" className="size-8" disabled={isSelf}>
-              <MoreHorizontal className="size-4" />
-              <span className="sr-only">Actions</span>
-            </Button>
+          <DropdownMenuTrigger
+            disabled={isSelf}
+            render={<Button variant="ghost" size="icon" className="size-8" />}
+          >
+            <MoreHorizontal className="size-4" />
+            <span className="sr-only">Actions</span>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Admin actions</DropdownMenuLabel>
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Admin actions</DropdownMenuLabel>
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => setRoleOpen(true)}>Change role</DropdownMenuItem>
             <DropdownMenuItem onClick={() => setMfaOpen(true)}>Reset MFA</DropdownMenuItem>
