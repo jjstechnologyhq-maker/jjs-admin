@@ -44,13 +44,28 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
 import { useCursorList } from "@/hooks/use-cursor-list";
+import { useClientTable } from "@/hooks/use-client-table";
 import { riskApi } from "@/api/risk";
-import type { RiskActionEnum, FlaggedTransactionResponse } from "@/api/schema";
+import type {
+  RiskActionEnum,
+  FlaggedTransactionResponse,
+  FlagSourceEnum,
+  RiskRuleResponse,
+} from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
 import { formatMoney } from "@/lib/money";
 
 const ACTIONS: RiskActionEnum[] = ["FLAG", "BLOCK", "NOTIFY"];
+const FLAG_SOURCES: FlagSourceEnum[] = ["RULE", "MANUAL"];
+
+function matchRule(rule: RiskRuleResponse, q: string) {
+  return (
+    (rule.description ?? "").toLowerCase().includes(q) ||
+    rule.action.toLowerCase().includes(q)
+  );
+}
 
 export default function RiskPage() {
   return (
@@ -79,6 +94,14 @@ function RulesCard() {
     queryFn: () => riskApi.listRules(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchRule,
+    pageSize: 10,
+  });
+
   const deactivate = useAuditedMutation({
     action: "deactivate_risk_rule",
     mutationFn: (id: string) => riskApi.deactivateRule(id),
@@ -95,7 +118,13 @@ function RulesCard() {
         </div>
         <CreateRuleDialog />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by description or action"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -116,8 +145,8 @@ function RulesCard() {
                     ))}
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((rule) => (
+              ) : table.total ? (
+                table.rows.map((rule) => (
                   <TableRow key={rule.id}>
                     <TableCell className="max-w-xs truncate">{rule.description ?? "—"}</TableCell>
                     <TableCell>
@@ -153,13 +182,23 @@ function RulesCard() {
               ) : (
                 <TableRow>
                   <TableCell colSpan={5} className="h-20 text-center text-sm text-muted-foreground">
-                    No active risk rules
+                    {query ? "No rules match your search" : "No active risk rules"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="rule"
+        />
       </CardContent>
     </Card>
   );
@@ -252,10 +291,19 @@ function CreateRuleDialog() {
 }
 
 function FlaggedCard() {
+  const [flaggedBy, setFlaggedBy] = React.useState<FlagSourceEnum | "ALL">("ALL");
+  const [dateFrom, setDateFrom] = React.useState("");
+
+  const filters = {
+    flaggedBy: flaggedBy === "ALL" ? undefined : flaggedBy,
+    dateFrom: dateFrom ? `${dateFrom}T00:00:00.000Z` : undefined,
+  };
+
   const list = useCursorList({
     queryKey: ["risk", "flagged"],
+    resetToken: JSON.stringify(filters),
     limit: 50,
-    fetcher: ({ cursor, limit }) => riskApi.listFlagged({ cursor, limit }),
+    fetcher: ({ cursor, limit }) => riskApi.listFlagged({ ...filters, cursor, limit }),
   });
 
   return (
@@ -265,6 +313,34 @@ function FlaggedCard() {
         <CardDescription>Transactions flagged by rules or manually</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <Select
+            value={flaggedBy}
+            onValueChange={(v) => setFlaggedBy(v as FlagSourceEnum | "ALL")}
+          >
+            <SelectTrigger size="sm" className="w-40">
+              <SelectValue placeholder="Source" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">All sources</SelectItem>
+              {FLAG_SOURCES.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">Flagged from</span>
+            <Input
+              type="date"
+              aria-label="Flagged from date"
+              className="w-40"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+            />
+          </div>
+        </div>
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">

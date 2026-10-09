@@ -1839,6 +1839,430 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/transaction-limits/general": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get platform-wide limits (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description The general config — the bounds that apply to every user who has no
+         *     override of their own.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The general limit document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        /**
+         * Update platform-wide limits (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description Defaults to `mode: merge`, so a body naming one pair changes only that
+         *     pair and leaves every other entry untouched.
+         *
+         *     Within an entry, merging is **not** per bound: submitting
+         *     `{"min": 500}` for a pair makes that entry min-only, discarding any
+         *     maximum previously stored at this tier. That is how a bound is removed;
+         *     use DELETE to remove an entry outright.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    /**
+                     * @example {
+                     *       "limits": {
+                     *         "swap": {
+                     *           "ngn_usdt": {
+                     *             "min": 2000,
+                     *             "max": 20000000
+                     *           }
+                     *         }
+                     *       },
+                     *       "mode": "merge"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["SetTransactionLimitsRequest"];
+                };
+            };
+            responses: {
+                /** @description The updated general limit document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transaction-limits/general/{kind}/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove one general entry (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description Removes an entry from the platform-wide config. An unconfigured maximum
+         *     makes that operation fail closed until it is set again.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /** @description Which family of limits the entry belongs to. */
+                    kind: components["parameters"]["limitKind"];
+                    /**
+                     * @description For swap a directed pair "<from>_<to>" such as ngn_usdt — direction
+                     *     matters. For transfer and withdrawal, a currency ticker such as ngn.
+                     * @example ngn_usdt
+                     */
+                    key: components["parameters"]["limitKey"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The updated general limit document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transaction-limits/users/{appUserId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a user's overrides (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description This user's overrides **only** — not merged with the general config.
+         *     An empty `limits` object is the normal result and means the user runs
+         *     entirely on the general config.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description The user's platform-wide identifier, identical to the `id` returned by
+                     *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+                     */
+                    appUserId: components["parameters"]["appUserId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The user's override document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        /**
+         * Set a user's overrides (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description Creates or updates this user's override document. Anything not
+         *     overridden continues to resolve from the general config, bound by bound.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description The user's platform-wide identifier, identical to the `id` returned by
+                     *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+                     */
+                    appUserId: components["parameters"]["appUserId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    /**
+                     * @example {
+                     *       "limits": {
+                     *         "swap": {
+                     *           "ngn_usdt": {
+                     *             "min": 50000
+                     *           }
+                     *         },
+                     *         "withdrawal": {
+                     *           "ngn": {
+                     *             "max": 250000
+                     *           }
+                     *         }
+                     *       },
+                     *       "mode": "merge"
+                     *     }
+                     */
+                    "application/json": components["schemas"]["SetTransactionLimitsRequest"];
+                };
+            };
+            responses: {
+                /** @description The updated override document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        post?: never;
+        /**
+         * Drop all of a user's overrides (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description Returns the user entirely to the general config.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description The user's platform-wide identifier, identical to the `id` returned by
+                     *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+                     */
+                    appUserId: components["parameters"]["appUserId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The now-empty override document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transaction-limits/users/{appUserId}/effective": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a user's effective limits (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description What actually applies to this user: the general config with their
+         *     overrides layered on, resolved one bound at a time.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description The user's platform-wide identifier, identical to the `id` returned by
+                     *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+                     */
+                    appUserId: components["parameters"]["appUserId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Merged limits plus both inputs */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["EffectiveTransactionLimits"];
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transaction-limits/users/{appUserId}/{kind}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Drop one kind of a user's overrides (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description Removes every `swap`, `transfer` or `withdrawal` override for this user,
+         *     so the general values apply to that kind again.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description The user's platform-wide identifier, identical to the `id` returned by
+                     *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+                     */
+                    appUserId: components["parameters"]["appUserId"];
+                    /** @description Which family of limits the entry belongs to. */
+                    kind: components["parameters"]["limitKind"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The updated override document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transaction-limits/users/{appUserId}/{kind}/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Drop one of a user's override entries (SUPER_ADMIN, FINANCE_MANAGER)
+         * @description Removes a single entry — e.g. the `ngn_usdt` swap bounds — so the
+         *     general values apply to it again.
+         */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    /**
+                     * @description The user's platform-wide identifier, identical to the `id` returned by
+                     *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+                     */
+                    appUserId: components["parameters"]["appUserId"];
+                    /** @description Which family of limits the entry belongs to. */
+                    kind: components["parameters"]["limitKind"];
+                    /**
+                     * @description For swap a directed pair "<from>_<to>" such as ngn_usdt — direction
+                     *     matters. For transfer and withdrawal, a currency ticker such as ngn.
+                     * @example ngn_usdt
+                     */
+                    key: components["parameters"]["limitKey"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The updated override document */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TransactionLimitsView"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/finance/wallets": {
         parameters: {
             query?: never;
@@ -3169,6 +3593,68 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description One configured bound pair. Both sides are individually optional, and an
+         *     absent side means "not configured at this tier" — it falls through to
+         *     the general config rather than meaning "unbounded".
+         */
+        LimitRange: {
+            /**
+             * @description Inclusive floor, in the operation's source currency.
+             * @example 2000
+             */
+            min?: number;
+            /**
+             * @description Inclusive cap, in the operation's source currency.
+             * @example 20000000
+             */
+            max?: number;
+        };
+        /**
+         * @description Limits grouped by kind. `swap` is keyed by a directed pair
+         *     "<from>_<to>"; `transfer` and `withdrawal` are keyed by a currency
+         *     ticker. Every level is optional — `{}` means "inherit everything".
+         */
+        TransactionLimitsDocument: {
+            swap?: {
+                [key: string]: components["schemas"]["LimitRange"];
+            };
+            transfer?: {
+                [key: string]: components["schemas"]["LimitRange"];
+            };
+            withdrawal?: {
+                [key: string]: components["schemas"]["LimitRange"];
+            };
+        };
+        TransactionLimitsView: {
+            /** @enum {string} */
+            scope: "general" | "user";
+            /**
+             * Format: uuid
+             * @description Present only when `scope` is `user`.
+             */
+            appUserId?: string;
+            limits: components["schemas"]["TransactionLimitsDocument"];
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        EffectiveTransactionLimits: {
+            /** Format: uuid */
+            appUserId: string;
+            effective: components["schemas"]["TransactionLimitsDocument"];
+            userOverrides: components["schemas"]["TransactionLimitsDocument"];
+            general: components["schemas"]["TransactionLimitsDocument"];
+        };
+        SetTransactionLimitsRequest: {
+            limits: components["schemas"]["TransactionLimitsDocument"];
+            /**
+             * @description `merge` layers the supplied entries over what is stored, leaving
+             *     untouched keys alone. `replace` swaps the whole document.
+             * @default merge
+             * @enum {string}
+             */
+            mode: "merge" | "replace";
+        };
         ErrorResponse: {
             /**
              * @description HTTP status code mirrored in the body
@@ -4342,6 +4828,19 @@ export interface components {
         userId: string;
         /** @description Transaction UUID */
         transactionId: string;
+        /**
+         * @description The user's platform-wide identifier, identical to the `id` returned by
+         *     GET /users and to the `{userId}` path parameter elsewhere in this API.
+         */
+        appUserId: string;
+        /** @description Which family of limits the entry belongs to. */
+        limitKind: "swap" | "transfer" | "withdrawal";
+        /**
+         * @description For swap a directed pair "<from>_<to>" such as ngn_usdt — direction
+         *     matters. For transfer and withdrawal, a currency ticker such as ngn.
+         * @example ngn_usdt
+         */
+        limitKey: string;
     };
     requestBodies: never;
     headers: never;

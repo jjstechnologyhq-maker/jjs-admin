@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { History, Search } from "lucide-react";
+import { History } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -15,25 +15,33 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
 import { useCursorList } from "@/hooks/use-cursor-list";
 import { analyticsApi } from "@/api/analytics";
 
 export default function AuditLogPage() {
   const [action, setAction] = React.useState("");
   const [entityType, setEntityType] = React.useState("");
-  const [debounced, setDebounced] = React.useState({ action: "", entityType: "" });
+  const [adminId, setAdminId] = React.useState("");
+  const [debounced, setDebounced] = React.useState({ action: "", entityType: "", adminId: "" });
 
   React.useEffect(() => {
     const t = setTimeout(
-      () => setDebounced({ action: action.trim(), entityType: entityType.trim() }),
+      () =>
+        setDebounced({
+          action: action.trim(),
+          entityType: entityType.trim(),
+          adminId: adminId.trim(),
+        }),
       350,
     );
     return () => clearTimeout(t);
-  }, [action, entityType]);
+  }, [action, entityType, adminId]);
 
   const filters = {
     action: debounced.action || undefined,
     entityType: debounced.entityType || undefined,
+    adminId: debounced.adminId || undefined,
   };
 
   const list = useCursorList({
@@ -57,21 +65,24 @@ export default function AuditLogPage() {
         </div>
       </div>
 
-      <div className="flex flex-col gap-3 sm:flex-row">
-        <div className="relative w-full sm:w-64">
-          <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-          <Input
-            placeholder="Filter by action (e.g. UPDATE_USER_STATUS)"
-            className="pl-8"
-            value={action}
-            onChange={(e) => setAction(e.target.value)}
-          />
-        </div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Filter by action (e.g. UPDATE_USER_STATUS)"
+          value={action}
+          onChange={setAction}
+        />
         <Input
           placeholder="Filter by entity type (e.g. User)"
           className="w-full sm:w-56"
           value={entityType}
           onChange={(e) => setEntityType(e.target.value)}
+        />
+        <SearchInput
+          className="sm:w-72"
+          placeholder="Filter by admin ID (UUID)"
+          value={adminId}
+          onChange={setAdminId}
         />
       </div>
 

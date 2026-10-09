@@ -41,16 +41,31 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
 
 import { financeApi, isPendingAdjustment } from "@/api/finance";
-import type { AdjustmentDirection, WalletType } from "@/api/schema";
+import type { AdjustmentDirection, WalletType, WalletBalanceResponse } from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
+import { useClientTable } from "@/hooks/use-client-table";
 import { parseAmount, formatAmount } from "@/lib/money";
+
+function matchWallet(w: WalletBalanceResponse, q: string) {
+  return `${w.asset} ${w.walletType}`.toLowerCase().includes(q);
+}
 
 export default function LiquidityPage() {
   const { data: wallets, isLoading } = useQuery({
     queryKey: ["finance", "wallets"],
     queryFn: () => financeApi.listWallets(),
+  });
+
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: wallets ?? [],
+    query,
+    filterFn: matchWallet,
+    pageSize: 8,
   });
 
   return (
@@ -73,6 +88,13 @@ export default function LiquidityPage() {
         </div>
       </div>
 
+      <SearchInput
+        className="sm:w-64"
+        placeholder="Search by asset or wallet type"
+        value={query}
+        onChange={setQuery}
+      />
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {isLoading
           ? Array.from({ length: 4 }).map((_, i) => (
@@ -86,7 +108,7 @@ export default function LiquidityPage() {
                 </CardContent>
               </Card>
             ))
-          : (wallets ?? []).map((w) => {
+          : table.rows.map((w) => {
               const low = parseAmount(w.balance) < parseAmount(w.alertThreshold);
               return (
                 <Card key={w.id} className={low ? "border-orange-500/50" : ""}>
@@ -122,10 +144,23 @@ export default function LiquidityPage() {
                 </Card>
               );
             })}
-        {!isLoading && (wallets ?? []).length === 0 && (
-          <p className="text-sm text-muted-foreground">No wallet records yet.</p>
+        {!isLoading && table.total === 0 && (
+          <p className="text-sm text-muted-foreground">
+            {query ? "No wallets match your search." : "No wallet records yet."}
+          </p>
         )}
       </div>
+
+      <CursorPagination
+        page={table.page}
+        canPrev={table.canPrev}
+        canNext={table.canNext}
+        onPrev={table.prev}
+        onNext={table.next}
+        total={table.total}
+        pageCount={table.pageCount}
+        itemLabel="wallet"
+      />
     </div>
   );
 }

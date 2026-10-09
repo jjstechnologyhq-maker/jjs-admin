@@ -40,11 +40,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
+import { useClientTable } from "@/hooks/use-client-table";
 
 import { pricingApi } from "@/api/pricing";
 import type {
   AssetSpreadResponse,
   AssetResponse,
+  FeeRuleResponse,
   FeeRuleTypeEnum,
   FeeCalculationTypeEnum,
 } from "@/api/schema";
@@ -52,6 +56,20 @@ import { useAuditedMutation } from "@/hooks/use-audited-mutation";
 
 const FEE_TYPES: FeeRuleTypeEnum[] = ["WITHDRAWAL", "SWAP", "VAS"];
 const FEE_CALC: FeeCalculationTypeEnum[] = ["FLAT", "PERCENTAGE"];
+
+function matchSpread(s: AssetSpreadResponse, q: string) {
+  return s.assetPair.toLowerCase().includes(q);
+}
+
+function matchAsset(a: AssetResponse, q: string) {
+  return a.asset.toLowerCase().includes(q);
+}
+
+function matchFee(f: FeeRuleResponse, q: string) {
+  return `${f.type} ${f.feeType} ${f.tier ?? ""} ${f.asset ?? ""}`
+    .toLowerCase()
+    .includes(q);
+}
 
 export default function PricingPage() {
   return (
@@ -85,6 +103,14 @@ function SpreadsCard() {
     queryFn: () => pricingApi.listSpreads(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchSpread,
+    pageSize: 10,
+  });
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -94,7 +120,13 @@ function SpreadsCard() {
         </div>
         <CreateSpreadDialog />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by asset pair"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -111,18 +143,28 @@ function SpreadsCard() {
                     <TableCell><Skeleton className="ml-auto h-8 w-32" /></TableCell>
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((s) => <SpreadRow key={s.id} spread={s} />)
+              ) : table.total ? (
+                table.rows.map((s) => <SpreadRow key={s.id} spread={s} />)
               ) : (
                 <TableRow>
                   <TableCell colSpan={2} className="h-20 text-center text-sm text-muted-foreground">
-                    No spreads configured
+                    {query ? "No spreads match your search" : "No spreads configured"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="spread"
+        />
       </CardContent>
     </Card>
   );
@@ -228,6 +270,14 @@ function AssetsCard() {
     queryFn: () => pricingApi.listAssets(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchAsset,
+    pageSize: 10,
+  });
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
@@ -237,7 +287,13 @@ function AssetsCard() {
         </div>
         <CreateAssetDialog />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by asset"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -254,18 +310,28 @@ function AssetsCard() {
                     <TableCell className="text-center"><Skeleton className="mx-auto h-5 w-8 rounded-full" /></TableCell>
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((a) => <AssetRow key={a.id} asset={a} />)
+              ) : table.total ? (
+                table.rows.map((a) => <AssetRow key={a.id} asset={a} />)
               ) : (
                 <TableRow>
                   <TableCell colSpan={2} className="h-20 text-center text-sm text-muted-foreground">
-                    No assets registered
+                    {query ? "No assets match your search" : "No assets registered"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="asset"
+        />
       </CardContent>
     </Card>
   );
@@ -342,6 +408,14 @@ function FeesCard() {
     queryFn: () => pricingApi.listFees(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchFee,
+    pageSize: 10,
+  });
+
   const deactivate = useAuditedMutation({
     action: "deactivate_fee",
     mutationFn: (feeId: string) => pricingApi.deactivateFee(feeId),
@@ -358,7 +432,13 @@ function FeesCard() {
         </div>
         <CreateFeeDialog />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by type, tier, or asset"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -380,8 +460,8 @@ function FeesCard() {
                     ))}
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((f) => (
+              ) : table.total ? (
+                table.rows.map((f) => (
                   <TableRow key={f.id}>
                     <TableCell>
                       <Badge variant="outline">{f.type}</Badge>
@@ -409,13 +489,23 @@ function FeesCard() {
               ) : (
                 <TableRow>
                   <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
-                    No active fee rules
+                    {query ? "No fee rules match your search" : "No active fee rules"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="fee rule"
+        />
       </CardContent>
     </Card>
   );

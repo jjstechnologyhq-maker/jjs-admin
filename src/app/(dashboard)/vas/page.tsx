@@ -40,12 +40,23 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge, type StatusMeta } from "@/components/status-badge";
+import { CursorPagination } from "@/components/cursor-pagination";
+import { SearchInput } from "@/components/search-input";
+import { useClientTable } from "@/hooks/use-client-table";
 import { vasApi } from "@/api/vas";
-import type { VasCategoryEnum } from "@/api/schema";
+import type { VasCategoryEnum, VasProviderResponse, VasProductResponse } from "@/api/schema";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
 import { formatAmount } from "@/lib/money";
 
 const CATEGORIES: VasCategoryEnum[] = ["AIRTIME", "DATA", "BILLS", "UTILITIES"];
+
+function matchProvider(p: VasProviderResponse, q: string) {
+  return `${p.name} ${p.category} ${p.status}`.toLowerCase().includes(q);
+}
+
+function matchProduct(p: VasProductResponse, q: string) {
+  return `${p.name} ${p.sku} ${p.providerName} ${p.category}`.toLowerCase().includes(q);
+}
 
 const PROVIDER_STATUS: Record<string, StatusMeta> = {
   ONLINE: { label: "Online", tone: "green" },
@@ -80,6 +91,14 @@ function ProvidersCard() {
     queryFn: () => vasApi.listProviders(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchProvider,
+    pageSize: 10,
+  });
+
   const toggle = useAuditedMutation({
     action: "toggle_vas_provider",
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -97,7 +116,13 @@ function ProvidersCard() {
         </div>
         <CreateProviderDialog />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by name, category, or status"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -118,8 +143,8 @@ function ProvidersCard() {
                     ))}
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((p) => (
+              ) : table.total ? (
+                table.rows.map((p) => (
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.name}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">{p.category}</TableCell>
@@ -140,13 +165,23 @@ function ProvidersCard() {
               ) : (
                 <TableRow>
                   <TableCell colSpan={5} className="h-20 text-center text-sm text-muted-foreground">
-                    No providers
+                    {query ? "No providers match your search" : "No providers"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="provider"
+        />
       </CardContent>
     </Card>
   );
@@ -235,6 +270,14 @@ function ProductsCard() {
     queryFn: () => vasApi.listProviders(),
   });
 
+  const [query, setQuery] = React.useState("");
+  const table = useClientTable({
+    items: data ?? [],
+    query,
+    filterFn: matchProduct,
+    pageSize: 10,
+  });
+
   const toggle = useAuditedMutation({
     action: "toggle_vas_product",
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -252,7 +295,13 @@ function ProductsCard() {
         </div>
         <CreateProductDialog providers={(providers ?? []).map((p) => ({ id: p.id, name: p.name }))} />
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <SearchInput
+          className="sm:w-64"
+          placeholder="Search by name, SKU, provider, or category"
+          value={query}
+          onChange={setQuery}
+        />
         <div className="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader className="bg-muted/50">
@@ -273,8 +322,8 @@ function ProductsCard() {
                     ))}
                   </TableRow>
                 ))
-              ) : data?.length ? (
-                data.map((p) => (
+              ) : table.total ? (
+                table.rows.map((p) => (
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.name}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground">{p.sku}</TableCell>
@@ -293,13 +342,23 @@ function ProductsCard() {
               ) : (
                 <TableRow>
                   <TableCell colSpan={5} className="h-20 text-center text-sm text-muted-foreground">
-                    No products
+                    {query ? "No products match your search" : "No products"}
                   </TableCell>
                 </TableRow>
               )}
             </TableBody>
           </Table>
         </div>
+        <CursorPagination
+          page={table.page}
+          canPrev={table.canPrev}
+          canNext={table.canNext}
+          onPrev={table.prev}
+          onNext={table.next}
+          total={table.total}
+          pageCount={table.pageCount}
+          itemLabel="product"
+        />
       </CardContent>
     </Card>
   );
