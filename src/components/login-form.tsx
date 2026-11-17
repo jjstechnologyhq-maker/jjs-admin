@@ -58,7 +58,8 @@ import { getErrorCode, getErrorMessage } from "@/api/client";
 // ── Zod schemas ────────────────────────────────────────────────────────────
 
 const credentialsSchema = z.object({
-  email: z.string().email("Enter a valid email address"),
+  // Backend trims + lowercases on login; trim here so stray spaces don't fail validation.
+  email: z.string().trim().email("Enter a valid email address"),
   password: z.string().min(1, "Password is required"),
 });
 type CredentialsData = z.infer<typeof credentialsSchema>;

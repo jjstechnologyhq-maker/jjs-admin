@@ -31,8 +31,11 @@ interface UseAuditedMutationOptions<TData, TVariables> {
   invalidateKeys?: InvalidateQueryFilters["queryKey"][];
   /** Toast message on success */
   successMessage?: string;
-  /** Toast message on error (defaults to generic) */
-  errorMessage?: string;
+  /**
+   * Toast message on error (defaults to generic). A function receives the error and may
+   * return `null` to suppress the toast (e.g. when the caller renders the error inline).
+   */
+  errorMessage?: string | ((error: Error) => string | null);
   /** Additional audit log details */
   auditDetails?: (variables: TVariables) => Record<string, unknown>;
   /** Callback after successful mutation */
@@ -76,7 +79,10 @@ export function useAuditedMutation<TData = unknown, TVariables = void>({
       onSuccess?.(data, variables);
     },
     onError: (error: Error, variables) => {
-      toast.error(errorMessage || `Failed to ${action.replace(/_/g, " ")}`);
+      const fallback = `Failed to ${action.replace(/_/g, " ")}`;
+      const message =
+        typeof errorMessage === "function" ? errorMessage(error) : errorMessage || fallback;
+      if (message) toast.error(message);
       onError?.(error, variables);
     },
   });

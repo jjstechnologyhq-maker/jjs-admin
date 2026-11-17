@@ -51,7 +51,9 @@ function ActivateFlow() {
       const code = getErrorCode(err);
       if (code === "INVITE_NOT_FOUND") setError("This invite link is invalid.");
       else if (code === "INVITE_ALREADY_USED") setError("This invite has already been used.");
-      else if (code === "INVITE_EXPIRED") setError("This invite has expired. Ask for a new one.");
+      else if (code === "INVITE_EXPIRED")
+        // 410 — link expired (24h) or already used. Only a super admin can issue a new one.
+        setError("This invite link has expired. Ask a super admin to resend your invite.");
       else setError(getErrorMessage(err, "Could not activate account"));
     }
   };
