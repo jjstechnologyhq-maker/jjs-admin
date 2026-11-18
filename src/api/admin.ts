@@ -61,8 +61,25 @@ export const adminApi = {
     await apiClient.post(`/admins/${adminId}/mfa/reset`, body);
   },
 
-  /** POST /admins/{adminId}/invite/resend — resend invite to a PENDING admin. */
+  /** POST /admins/{adminId}/invite/resend — resend invite to a PENDING admin (204; 409 INVITE_NOT_PENDING). */
   resendInvite: async (adminId: string): Promise<void> => {
     await apiClient.post(`/admins/${adminId}/invite/resend`);
+  },
+
+  /**
+   * Find a PENDING admin by email. The 409 INVITE_ALREADY_PENDING response carries no
+   * admin ID, so walk the PENDING list. Emails are stored lowercase — compare case-insensitively.
+   */
+  findPendingByEmail: async (email: string): Promise<AdminProfile | null> => {
+    const target = email.trim().toLowerCase();
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const res = await adminApi.list({ status: "PENDING", cursor, limit: 100 });
+      const hit = res.data.find((a) => a.email.toLowerCase() === target);
+      if (hit) return hit;
+      if (!res.meta.hasMore || !res.meta.nextCursor) return null;
+      cursor = res.meta.nextCursor;
+    }
+    return null;
   },
 };

@@ -53,7 +53,9 @@ import { StatusBadge, ADMIN_STATUS } from "@/components/status-badge";
 import { CursorPagination } from "@/components/cursor-pagination";
 import { SearchInput } from "@/components/search-input";
 import { useCursorList } from "@/hooks/use-cursor-list";
+import { useQueryClient } from "@tanstack/react-query";
 import { adminApi } from "@/api/admin";
+import { getErrorCode, getErrorMessage } from "@/api/client";
 import type { AdminProfile, AdminRole, AdminStatus } from "@/api/schema";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuditedMutation } from "@/hooks/use-audited-mutation";
@@ -187,8 +189,11 @@ export default function AdminManagementPage() {
 }
 
 function AdminRow({ admin }: { admin: AdminProfile }) {
+  const queryClient = useQueryClient();
   const currentEmail = useAuthStore((s) => s.session?.email);
-  const isSelf = currentEmail === admin.email;
+  // Backend returns emails lowercase; never compare case-sensitively.
+  const isSelf =
+    !!currentEmail && currentEmail.toLowerCase() === admin.email.toLowerCase();
   const [mfaOpen, setMfaOpen] = React.useState(false);
   const [roleOpen, setRoleOpen] = React.useState(false);
 
@@ -203,6 +208,12 @@ function AdminRow({ admin }: { admin: AdminProfile }) {
     mutationFn: () => adminApi.resendInvite(admin.id),
     invalidateKeys: [["admins", "list"]],
     successMessage: "Invite resent",
+    errorMessage: (err) =>
+      getErrorCode(err) === "INVITE_NOT_PENDING"
+        ? "This admin is no longer pending — refreshing the list."
+        : getErrorMessage(err, "Failed to resend invite"),
+    // Status changed under us (activated/deactivated) — refresh so the row updates.
+    onError: () => queryClient.invalidateQueries({ queryKey: ["admins", "list"] }),
   });
 
   return (
@@ -288,24 +299,80 @@ function AdminRow({ admin }: { admin: AdminProfile }) {
   );
 }
 
+/** Invite outcomes that render inline in the dialog instead of a toast. */
+type InviteConflict =
+  | { kind: "pending" }
+  | { kind: "exists" }
+  | { kind: "locked" };
+
 function InviteDialog() {
+  const queryClient = useQueryClient();
   const [open, setOpen] = React.useState(false);
   const [email, setEmail] = React.useState("");
   const [role, setRole] = React.useState<AdminRole>("CUSTOMER_SUPPORT");
+  const [conflict, setConflict] = React.useState<InviteConflict | null>(null);
 
+  const reset = () => {
+    setEmail("");
+    setConflict(null);
+  };
+
+  // Send the email as typed — the backend trims + lowercases it.
+  // 201 covers both a brand-new email and a pending one whose 24h link expired (fresh link sent).
   const mutation = useAuditedMutation({
     action: "invite_admin",
-    mutationFn: () => adminApi.invite({ email, role }),
+    mutationFn: () => adminApi.invite({ email: email.trim(), role }),
     invalidateKeys: [["admins", "list"]],
     successMessage: "Invitation sent",
+    errorMessage: (err) => {
+      const code = getErrorCode(err);
+      if (code === "INVITE_ALREADY_PENDING" || code === "ADMIN_ALREADY_EXISTS" || code === "EMAIL_LOCKED")
+        return null; // rendered inline
+      return getErrorMessage(err, "Failed to send invite");
+    },
     onSuccess: () => {
       setOpen(false);
-      setEmail("");
+      reset();
+    },
+    onError: (err) => {
+      const code = getErrorCode(err);
+      if (code === "INVITE_ALREADY_PENDING") setConflict({ kind: "pending" });
+      else if (code === "ADMIN_ALREADY_EXISTS") setConflict({ kind: "exists" });
+      else if (code === "EMAIL_LOCKED") setConflict({ kind: "locked" });
     },
   });
 
+  // 409 INVITE_ALREADY_PENDING has no admin ID — look it up in the PENDING list, then resend.
+  const resend = useAuditedMutation({
+    action: "resend_admin_invite",
+    mutationFn: async () => {
+      const pending = await adminApi.findPendingByEmail(email);
+      if (!pending) throw new Error("Couldn't find the pending invite for this email.");
+      await adminApi.resendInvite(pending.id);
+    },
+    invalidateKeys: [["admins", "list"]],
+    successMessage: "Invite resent",
+    errorMessage: (err) =>
+      getErrorCode(err) === "INVITE_NOT_PENDING"
+        ? "This admin is no longer pending."
+        : getErrorMessage(err, "Failed to resend invite"),
+    onSuccess: () => {
+      setOpen(false);
+      reset();
+    },
+    onError: () => queryClient.invalidateQueries({ queryKey: ["admins", "list"] }),
+  });
+
+  const busy = mutation.isPending || resend.isPending;
+
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v);
+        if (!v) setConflict(null);
+      }}
+    >
       <DialogTrigger>
         <Button className="gap-2">
           <UserPlus className="size-4" />
@@ -330,10 +397,29 @@ function InviteDialog() {
                 className="pl-8"
                 placeholder="colleague@company.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  setConflict(null);
+                }}
               />
             </div>
           </div>
+          {conflict?.kind === "pending" && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+              An invite is already pending for this email and its link is still valid. You can
+              resend it instead.
+            </div>
+          )}
+          {conflict?.kind === "exists" && (
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              This email already belongs to an active or suspended admin.
+            </div>
+          )}
+          {conflict?.kind === "locked" && (
+            <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              This email belongs to a deactivated admin and is locked for 90 days.
+            </div>
+          )}
           <div className="grid gap-2">
             <Label>Role</Label>
             <Select value={role} onValueChange={(v) => setRole(v as AdminRole)}>
@@ -354,10 +440,20 @@ function InviteDialog() {
           <Button variant="outline" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button onClick={() => email && mutation.mutate()} disabled={!email || mutation.isPending}>
-            {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
-            Send invite
-          </Button>
+          {conflict?.kind === "pending" ? (
+            <Button onClick={() => resend.mutate()} disabled={busy}>
+              {resend.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+              Resend invite
+            </Button>
+          ) : (
+            <Button
+              onClick={() => email.trim() && mutation.mutate()}
+              disabled={!email.trim() || busy || !!conflict}
+            >
+              {mutation.isPending && <Loader2 className="mr-2 size-4 animate-spin" />}
+              Send invite
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

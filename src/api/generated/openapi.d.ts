@@ -518,7 +518,14 @@ export interface paths {
          * Invite a new admin (SUPER_ADMIN)
          * @description Creates an admin account in PENDING status and sends an invite email containing a
          *     one-time activation token. Returns the new admin's ID and email.
-         *     Returns 409 if an invitation is already pending for this email.
+         *     The email is trimmed and lowercased server-side (on invite and login) and returned lowercase.
+         *     If the email is PENDING and its link has expired (links last 24h), a fresh link is sent
+         *     to the same admin and 201 is returned.
+         *     409 errorCodes:
+         *       - INVITE_ALREADY_PENDING — pending invite with a still-valid link (no adminId in body;
+         *         look it up via GET /admins?status=PENDING and use the resend endpoint)
+         *       - ADMIN_ALREADY_EXISTS — email belongs to an ACTIVE or SUSPENDED admin
+         *       - EMAIL_LOCKED — email belongs to a DEACTIVATED admin (locked for 90 days)
          */
         post: {
             parameters: {
@@ -557,7 +564,7 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
-                /** @description Invite already pending for this email */
+                /** @description Email conflict (INVITE_ALREADY_PENDING | ADMIN_ALREADY_EXISTS | EMAIL_LOCKED) */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -598,7 +605,7 @@ export interface paths {
          *     On success activates the account and returns `{ otpauthUrl, secret }` so the admin
          *     can immediately set up their TOTP authenticator. They must call POST /auth/totp/confirm
          *     to complete MFA enrollment before they can log in.
-         *     Returns 404 if token is unknown, 409 if already used, 422 if expired.
+         *     Returns 404 if token is unknown, 410 INVITE_EXPIRED if the link is expired or already used.
          */
         post: {
             parameters: {
@@ -647,34 +654,16 @@ export interface paths {
                         "application/json": components["schemas"]["ErrorResponse"];
                     };
                 };
-                /** @description Invite token already used */
-                409: {
+                /** @description Invite link expired or already used */
+                410: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
                         /**
                          * @example {
-                         *       "code": 409,
-                         *       "message": "Invite token has already been used",
-                         *       "details": {
-                         *         "errorCode": "INVITE_ALREADY_USED"
-                         *       }
-                         *     }
-                         */
-                        "application/json": components["schemas"]["ErrorResponse"];
-                    };
-                };
-                /** @description Invite token expired */
-                422: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        /**
-                         * @example {
-                         *       "code": 422,
-                         *       "message": "Invite token has expired",
+                         *       "code": 410,
+                         *       "message": "Invite link has expired",
                          *       "details": {
                          *         "errorCode": "INVITE_EXPIRED"
                          *       }
@@ -901,7 +890,7 @@ export interface paths {
         /**
          * Resend invite email (SUPER_ADMIN)
          * @description Generates a new invite token and resends the invite email to a PENDING admin.
-         *     The previous token is invalidated. Returns 422 if the account is not in PENDING status.
+         *     The previous token is invalidated. Returns 409 INVITE_NOT_PENDING if the account is not in PENDING status.
          */
         post: {
             parameters: {
@@ -926,14 +915,14 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["AdminNotFound"];
                 /** @description Account is not in PENDING status */
-                422: {
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
                         /**
                          * @example {
-                         *       "code": 422,
+                         *       "code": 409,
                          *       "message": "Account is not awaiting activation",
                          *       "details": {
                          *         "errorCode": "INVITE_NOT_PENDING"
